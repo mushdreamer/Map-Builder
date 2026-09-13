@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - exercised by dependency check in main
 
 TOOL_VERSION = 1
 FOOTPRINT_RE = re.compile(r"(?<!\d)(\d+)x(\d+)(?!\d)", re.IGNORECASE)
-FINAL_HINTS = ("final", "flatten", "composite", "concept", "preview")
+FINAL_HINTS = ("final", "flatten", "composite", "concept", "preview", "概念", "效果", "车站")
 
 
 @dataclass(frozen=True)
@@ -247,6 +247,7 @@ def exact_matches(pngs: list[dict[str, Any]], root: Path, layers: list[tuple[dic
                     candidates.append({
                         "layerPath": layer["layerPath"],
                         "layerBounds": layer["bounds"],
+                        "zIndex": layer["zIndex"],
                         "transform": layer_transform,
                         "confidence": 1.0,
                         "method": "trimmed-rgba-sha256",
@@ -261,11 +262,70 @@ def choose_final(png_paths: list[Path], psd_paths: list[Path]) -> Path | None:
     for path in png_paths:
         lower = path.stem.lower()
         score = sum(1 for hint in FINAL_HINTS if hint in lower)
+        # Production deliveries commonly separate the flattened image from split
+        # assets by directory even when filenames are not English.
+        if "concept" in path.parent.name.lower():
+            score += 10
         if lower in excluded:
             score -= 1
         if score > 0:
             ranked.append((score, path.stat().st_size, path))
     return max(ranked, default=(0, 0, None))[2]
+
+
+def build_unity_placements(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Convert unambiguous exact layer matches to a Unity-consumable manifest.
+
+    Positions remain deterministic document-pixel calculations.  Unity imports
+    sprites at tileWidth PPU, so one TMX tile is one world unit.
+    """
+    psd = manifest["psd"][0] if manifest.get("psd") else None
+    tmx = manifest["tmx"][0] if manifest.get("tmx") else None
+    ppu = (tmx or {}).get("tileWidth", 0) or 1
+    document_height = (psd or {}).get("height", 0)
+    png_by_path = {item["path"]: item for item in manifest.get("png", [])}
+    placements = []
+    # Candidate transform converts PSD pixels to PNG pixels; Unity needs inverse.
+    transform_rotation = {"identity": 0, "rotate90": -90, "rotate180": 180,
+                          "rotate270": 90, "flipX": 0, "flipY": 0}
+    matches = manifest.get("matches", [])
+    owners: dict[str, set[str]] = {}
+    for match in matches:
+        for candidate in match.get("candidates", []):
+            owners.setdefault(candidate["layerPath"], set()).add(match["assetPath"])
+    for match in matches:
+      for candidate in match.get("candidates", []):
+        # Multiple occurrences of one asset are valid.  A layer matching multiple
+        # delivered files is an identity ambiguity and remains for manual review.
+        if len(owners[candidate["layerPath"]]) != 1:
+            continue
+        left, top, right, bottom = candidate["layerBounds"]
+        asset = png_by_path[match["assetPath"]]
+        transform = candidate["transform"]
+        placements.append({
+            "instanceId": hashlib.sha256(
+                f'{match["assetPath"]}|{candidate["layerPath"]}'.encode()).hexdigest()[:24],
+            "assetKey": asset["assetKey"],
+            "assetPath": match["assetPath"],
+            "layerPath": candidate["layerPath"],
+            "position": {"x": (left + right) / (2 * ppu),
+                         "y": (document_height - (top + bottom) / 2) / ppu,
+                         "z": 0},
+            "rotationDeg": transform_rotation[transform],
+            "scale": {"x": -1 if transform == "flipX" else 1,
+                      "y": -1 if transform == "flipY" else 1},
+            "sortingOrder": 30000 - candidate["zIndex"],
+            "confidence": 1.0,
+            "reviewState": "autoAccepted",
+            "noCollision": asset["noCollision"],
+            "footprint": asset["footprintHint"],
+        })
+    assets = [{"assetKey": item["assetKey"], "assetPath": item["path"],
+               "noCollision": item["noCollision"], "footprint": item["footprintHint"]}
+              for item in manifest.get("png", [])]
+    return {"formatVersion": 1, "pixelsPerUnit": ppu,
+            "documentWidth": (psd or {}).get("width", 0),
+            "documentHeight": document_height, "assets": assets, "placements": placements}
 
 
 def compare_images(left: Any, right: Any) -> dict[str, Any]:
@@ -356,6 +416,8 @@ def run(source: Path, output: Path) -> dict[str, Any]:
                 all_layers.extend(layers)
             except Exception as error:
                 issues.append(Issue("error", "psd-parse", f"{rel(path, sample_root)}: {error}"))
+        for z_index, (record, _) in enumerate(all_layers):
+            record["zIndex"] = z_index
         matches = exact_matches(pngs, sample_root, all_layers) if all_layers else []
         composite_comparison = None
         if final is not None and psds and psds[0].get("compositePath"):
@@ -378,7 +440,9 @@ def run(source: Path, output: Path) -> dict[str, Any]:
             "matches": matches,
             "issues": [asdict(issue) for issue in issues],
         }
+        unity_manifest = build_unity_placements(manifest)
         (staging / "reconstruction.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (staging / "unity-placements.json").write_text(json.dumps(unity_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         (staging / "audit-report.md").write_text(make_report(manifest, issues), encoding="utf-8")
         output.parent.mkdir(parents=True, exist_ok=True)
         replacement = output.with_name(output.name + ".new")

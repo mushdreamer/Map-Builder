@@ -18,7 +18,23 @@ namespace KenneyShooter
         public float cellSize = 1f;
         public List<KenneyMapLayer> layers = new List<KenneyMapLayer>();
         public List<KenneyCellNote> cellNotes = new List<KenneyCellNote>();
+        public List<KenneyArtPlacement> placements = new List<KenneyArtPlacement>();
         public KenneyMapMeta meta = new KenneyMapMeta();
+    }
+
+    [Serializable]
+    public class KenneyArtPlacement
+    {
+        public string instanceId;
+        public string assetKey;
+        public string layerPath;
+        public Vector3 position;
+        public float rotationDeg;
+        public Vector2 scale = Vector2.one;
+        public int sortingOrder;
+        public float confidence;
+        public string reviewState;
+        public bool noCollision;
     }
 
     [Serializable]
@@ -176,7 +192,7 @@ namespace KenneyShooter
 
     public static class KenneyMapFormat
     {
-        public const int CurrentVersion = 2;
+        public const int CurrentVersion = 3;
 
         public const string RootObjectName = "KenneySampleMap";
         public static readonly string[] LayerOrder =
