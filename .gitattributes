@@ -1,0 +1,2 @@
+Assets/Station/Photoshop[[:space:]]File/*.psd filter=lfs diff=lfs merge=lfs -text
+Assets/Station/Photoshop[[:space:]]File/* filter=lfs diff=lfs merge=lfs -text
