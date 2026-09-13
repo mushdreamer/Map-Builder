@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from PIL import Image
 
 
 MODULE_PATH = Path(__file__).parents[1] / "audit.py"
@@ -57,6 +58,45 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(2, len(result["assets"]))
         self.assertEqual(2, len(result["placements"]))
         self.assertEqual({"x": 0.5, "y": 6.0, "z": 0}, result["placements"][0]["position"])
+
+    def test_confirmed_match_supports_rotation_scale_and_small_resampling_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Image.new("RGBA", (12, 20), (0, 0, 0, 0))
+            for x in range(2, 10):
+                for y in range(3, 18):
+                    source.putpixel((x, y), (220, 40 + x, 80 + y, 255))
+            (root / "asset.png").parent.mkdir(exist_ok=True)
+            source.save(root / "asset.png")
+            target = audit.normalized_rgba(source).transpose(Image.Transpose.ROTATE_90)
+            target = target.resize((30, 16), Image.Resampling.LANCZOS)
+            # Simulate a slight Photoshop color/resampling delta.
+            red, green, blue, alpha = target.split()
+            red = red.point(lambda value: min(255, value + 2))
+            target = Image.merge("RGBA", (red, green, blue, alpha))
+            png = {"path": "asset.png", "assetKey": "asset", "noCollision": False,
+                   "footprintHint": None}
+            layer = {"layerPath": "group/instance", "bounds": [10, 20, 40, 36],
+                     "zIndex": 4, "isGroup": False}
+            result = audit.confirmed_matches([png], root, [(layer, target)])
+            self.assertEqual("confirmed", result[0]["status"])
+            self.assertEqual("rotate90", result[0]["candidates"][0]["transform"])
+            self.assertAlmostEqual(2.0, result[0]["candidates"][0]["scaleX"])
+
+    def test_identical_assets_are_review_not_auto_accepted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = Image.new("RGBA", (8, 8), (20, 80, 160, 255))
+            pngs = []
+            for name in ("a", "b"):
+                image.save(root / f"{name}.png")
+                pngs.append({"path": f"{name}.png", "assetKey": name,
+                             "noCollision": False, "footprintHint": None})
+            layer = {"layerPath": "duplicate", "bounds": [0, 0, 8, 8],
+                     "zIndex": 0, "isGroup": False}
+            result = audit.confirmed_matches(pngs, root, [(layer, image)])
+            self.assertEqual("review", result[0]["status"])
+            self.assertEqual(0, len(result[0]["candidates"]))
 
 
 if __name__ == "__main__":
