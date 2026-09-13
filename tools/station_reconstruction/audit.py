@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - exercised by dependency check in main
     ImageChops = None
 
 
-TOOL_VERSION = 5
+TOOL_VERSION = 6
 FOOTPRINT_RE = re.compile(r"(?<!\d)(\d+)x(\d+)(?!\d)", re.IGNORECASE)
 FINAL_HINTS = ("final", "flatten", "composite", "concept", "preview", "概念", "效果", "车站")
 TOKEN_RE = re.compile(r"[a-z]+|[\u3400-\u9fff]+", re.IGNORECASE)
@@ -35,7 +35,7 @@ GENERIC_TOKENS = {
 FREE_ROTATIONS = (-45, -30, -15, 15, 30, 45)
 ASSET_ROLES = ("base", "overlay", "decal", "edge", "floor")
 ROLE_LAYER_HINTS = {
-    "decal": ("地表贴花", "贴花", "decal"),
+    "decal": ("地表贴花", "surface decal", "decal"),
     "edge": ("边缘地砖", "边缘", "edgetile", "edge tile"),
     "floor": ("地面", "地板", "floor", "ground"),
 }
@@ -354,6 +354,69 @@ def transformed_asset_variants(image: Any) -> Iterable[tuple[str, Any]]:
     yield from transformed_variants(image)
 
 
+def decal_subtype(png: dict[str, Any]) -> str:
+    key = png.get("assetKey", "").lower()
+    if "stain" in key:
+        return "stain"
+    if "snow" in key:
+        return "snow"
+    return "decal"
+
+
+def layer_decal_subtype(layer_path: str) -> str | None:
+    lower = layer_path.lower()
+    if any(hint in lower for hint in ("stain", "污渍", "污迹", "血液", "blood")):
+        return "stain"
+    if any(hint in lower for hint in ("snow", "雪")):
+        return "snow"
+    if any(hint in lower for hint in ROLE_LAYER_HINTS["decal"]):
+        return "decal"
+    return None
+
+
+def matching_layer_allowed(png: dict[str, Any], layer_path: str) -> bool:
+    """Partition decal layers and hold unsupported floor assets for review."""
+    role = png.get("assetRole", "base")
+    if role == "floor":
+        return False
+    layer_subtype = layer_decal_subtype(layer_path)
+    if role == "decal":
+        return layer_subtype == decal_subtype(png)
+    return layer_subtype is None
+
+
+def visual_equivalence_classes(asset_variants: dict[str, list[tuple[str, Any]]]) -> dict[str, str]:
+    """Group PNGs whose untransformed, trimmed pixels are safely interchangeable."""
+    paths = sorted(asset_variants)
+    parents = {path: path for path in paths}
+
+    def find(path: str) -> str:
+        while parents[path] != path:
+            parents[path] = parents[parents[path]]
+            path = parents[path]
+        return path
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[max(left_root, right_root)] = min(left_root, right_root)
+
+    identities = {path: variants[0][1] for path, variants in asset_variants.items()}
+    digests = {path: pixel_digest(image) for path, image in identities.items()}
+    for index, left in enumerate(paths):
+        for right in paths[index + 1:]:
+            equivalent = digests[left] == digests[right]
+            if not equivalent:
+                metrics = similarity(identities[left], identities[right])
+                equivalent = bool(metrics and metrics["confidence"] >= 0.99
+                                  and metrics["alphaIoU"] >= 0.99
+                                  and metrics["alphaMae"] <= 0.01
+                                  and metrics["colorMae"] <= 0.01)
+            if equivalent:
+                union(left, right)
+    return {path: find(path) for path in paths}
+
+
 def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
                       layers: list[tuple[dict[str, Any], Any]],
                       threshold: float = 0.90, margin: float = 0.025) -> list[dict[str, Any]]:
@@ -362,6 +425,7 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
     for png in pngs:
         with Image.open(root / png["path"]) as source:
             asset_variants[png["path"]] = list(transformed_asset_variants(source.convert("RGBA")))
+    equivalence_classes = visual_equivalence_classes(asset_variants)
     by_asset: dict[str, list[dict[str, Any]]] = {png["path"]: [] for png in pngs}
     review_by_asset: dict[str, list[dict[str, Any]]] = {png["path"]: [] for png in pngs}
     pending = []
@@ -373,6 +437,8 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
         target = normalized_rgba(image)
         ranked: list[dict[str, Any]] = []
         for png in pngs:
+            if not matching_layer_allowed(png, layer["layerPath"]):
+                continue
             for transform, variant in asset_variants[png["path"]]:
                 metrics = similarity(variant, target)
                 if metrics is not None:
@@ -380,6 +446,7 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
                     footprint = footprint_evidence(png.get("footprintHint"), transform, target.size)
                     ranked.append({"confidence": metrics["confidence"], "assetPath": png["path"],
                                    "transform": transform, "metrics": metrics,
+                                   "equivalenceClass": equivalence_classes[png["path"]],
                                    "semanticEvidence": semantic, "footprintEvidence": footprint})
         ranked.sort(key=lambda item: item["confidence"], reverse=True)
         if not ranked:
@@ -409,11 +476,28 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
                     0.06 * item["semanticEvidence"]
                     + 0.03 * item["footprintEvidence"]
                     + 0.04 * item["prototypeEvidence"] if safe else 0.0))
-            ranked.sort(key=lambda item: (item["tieScore"], item["confidence"]), reverse=True)
-            best = ranked[0]
-            runner_up = next((item for item in ranked[1:]
-                              if item["assetPath"] != best["assetPath"]), None)
-            score_margin = best["tieScore"] - (runner_up["tieScore"] if runner_up else 0.0)
+            visually_ranked = sorted(ranked, key=lambda item: item["confidence"], reverse=True)
+            visual_best = visually_ranked[0]
+            visual_runner = next((item for item in visually_ranked[1:]
+                                  if item["equivalenceClass"]
+                                  != visual_best["equivalenceClass"]), None)
+            visual_margin = visual_best["confidence"] - (
+                visual_runner["confidence"] if visual_runner else 0.0)
+            if visual_margin >= margin:
+                # A clear visual winner must not be overturned by naming hints.
+                best = visual_best
+                runner_up = visual_runner
+                score_margin = visual_margin
+            else:
+                close = [item for item in ranked
+                         if item["confidence"] >= visual_best["confidence"] - margin]
+                close.sort(key=lambda item: (item["tieScore"], item["confidence"]), reverse=True)
+                best = close[0]
+                runner_up = next((item for item in close[1:]
+                                  if item["equivalenceClass"] != best["equivalenceClass"]), None)
+                score_margin = best["tieScore"] - (runner_up["tieScore"] if runner_up else 0.0)
+            equivalent_paths = sorted(path for path, class_id in equivalence_classes.items()
+                                      if class_id == best["equivalenceClass"])
             candidate = {
                 "layerPath": layer["layerPath"], "layerBounds": layer["bounds"],
                 "zIndex": layer["zIndex"], "transform": best["transform"],
@@ -422,6 +506,9 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
                 "semanticEvidence": round(best["semanticEvidence"], 6),
                 "footprintEvidence": round(best["footprintEvidence"], 6),
                 "prototypeEvidence": round(best["prototypeEvidence"], 6),
+                "equivalentAssetPaths": equivalent_paths,
+                "ambiguityResolution": ("visual-equivalence-class"
+                                        if len(equivalent_paths) > 1 else None),
                 "method": "alpha-aware-resampled",
                 **{key: round(value, 6) for key, value in best["metrics"].items()
                    if key != "confidence"},
@@ -465,14 +552,7 @@ def role_layer_allowed(png: dict[str, Any], layer_path: str) -> bool:
     role = png.get("assetRole", "base")
     lower_path = layer_path.lower()
     if role == "decal":
-        key = png.get("assetKey", "").lower()
-        if "stain" in key:
-            hints = ("stain", "污渍", "污迹")
-        elif "snow" in key:
-            hints = ("snow", "雪")
-        else:
-            hints = ROLE_LAYER_HINTS["decal"]
-        return any(hint in lower_path for hint in hints)
+        return layer_decal_subtype(layer_path) == decal_subtype(png)
     if role == "edge":
         return any(hint in lower_path for hint in ROLE_LAYER_HINTS["edge"])
     return role == "base"
@@ -518,7 +598,8 @@ def role_diagnostics(pngs: list[dict[str, Any]], root: Path,
         score, layer, transform, metrics, target = best
         competitor_score = 0.0
         for other in pngs:
-            if other["path"] == png["path"]:
+            if (other["path"] == png["path"]
+                    or not matching_layer_allowed(other, layer["layerPath"])):
                 continue
             for _other_transform, variant in variants[other["path"]]:
                 other_metrics = similarity(variant, target)
@@ -698,7 +779,11 @@ def make_report(manifest: dict[str, Any], issues: list[Issue]) -> str:
     for match in matches:
         if match["status"] != "confirmed":
             continue
-        candidate_names = ", ".join(candidate["layerPath"] for candidate in match["candidates"])
+        candidate_names = ", ".join(
+            candidate["layerPath"] + (
+                " [visual equivalence: " + ", ".join(candidate["equivalentAssetPaths"]) + "]"
+                if candidate.get("ambiguityResolution") == "visual-equivalence-class" else "")
+            for candidate in match["candidates"])
         lines.append(f"- `{match['assetPath']}` → {candidate_names}")
     lines.extend(["", "## Review candidates", ""])
     for match in matches:

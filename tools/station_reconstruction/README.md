@@ -61,14 +61,21 @@ and Unity rotation, scale, and margin against the best competing PNG. This is
 reported even when the candidate is below the confirmation gates, so Review and
 Unmatched failure modes can be inspected without changing those gates.
 
-Unresolved `decal` and `edge` diagnostics use PSD path scopes to reduce noise:
-general decals prefer `地表贴花`/decal paths, stain and snow filenames require
-their corresponding path hints, and edge assets prefer `边缘地砖`/edge paths.
-Floor PNGs do not receive ordinary object-candidate diagnostics; instead the
-report inventories PSD paths that look like ground/floor regions. All of these
-role scopes are diagnostic-only. Existing confirmed matches and Unity placements
-continue to come from the unchanged global matcher, and no composite-asset or
-automatic floor-placement behavior is introduced.
+The matcher treats exact or extremely close PNG pixels as a visual equivalence
+class. Equivalent filenames no longer reduce one another's candidate margin;
+the selected representative and all equivalent paths are recorded in the
+manifest. Every representative must still clear the unchanged visual gates. A
+clear visual winner is also selected before semantic tie-breaking, so a naming
+hint cannot overturn a candidate that already has the required visual margin.
+
+`decal` matching is now partitioned by PSD path before running the same
+transform-aware, alpha-aware scoring and unchanged confirmation gates. General
+`dec_*` assets match only `地表贴花`/decal paths, `stain_*` only stain/污渍/血液
+paths, and `snow_*` only snow/雪 paths. Safely confirmed decal candidates flow
+through the existing `matches` and Unity placement output. Edge scope remains
+diagnostic-only because it has not produced useful candidates, while floor PNGs
+still receive no ordinary object-candidate diagnostics or automatic placement;
+no composite-asset behavior is introduced.
 
 Then open the map scene in Unity and use
 `Tools → Kenney → Art Reconstruction → PNG to Prefabs and Place`:
