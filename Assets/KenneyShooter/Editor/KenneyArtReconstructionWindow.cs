@@ -13,6 +13,7 @@ public class KenneyArtReconstructionWindow : EditorWindow
     const string FloorTileAssetPath = PrefabFolder + "/NoColition_Tile_basic_FloorArt.asset";
     const string GeneratedRootName = "ReconstructedPrefabs";
     string manifestPath = "ReconstructionReports/station/unity-placements.json";
+    readonly bool[] tierVisible = { true, true, true, true, true, true };
 
     [Serializable] class Manifest { public int pixelsPerUnit; public List<AssetRecord> assets; public List<Record> placements; }
     [Serializable] class AssetRecord
