@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - exercised by dependency check in main
     ImageChops = None
 
 
-TOOL_VERSION = 7
+TOOL_VERSION = 9
 FOOTPRINT_RE = re.compile(r"(?<!\d)(\d+)x(\d+)(?!\d)", re.IGNORECASE)
 FINAL_HINTS = ("final", "flatten", "composite", "concept", "preview", "概念", "效果", "车站")
 TOKEN_RE = re.compile(r"[a-z]+|[\u3400-\u9fff]+", re.IGNORECASE)
@@ -565,6 +565,68 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
     return matches
 
 
+def confidence_tier(score: float, metrics: dict[str, float], score_margin: float) -> str:
+    """Classify non-accepted visual candidates without relaxing acceptance gates."""
+    if (score >= 0.95 and score_margin >= 0.01 and metrics["alphaIoU"] >= 0.90
+            and metrics["colorMae"] <= 0.08):
+        return "B"
+    if score >= 0.90 and metrics["alphaIoU"] >= 0.85 and metrics["colorMae"] <= 0.15:
+        return "C"
+    if score >= 0.82 and metrics["alphaIoU"] >= 0.70:
+        return "D"
+    if score >= 0.65 and metrics["alphaIoU"] >= 0.50:
+        return "E"
+    return "F"
+
+
+def best_effort_candidates(pngs: list[dict[str, Any]], root: Path,
+                           layers: list[tuple[dict[str, Any], Any]],
+                           matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return one review-only visual candidate for every unconfirmed PSD instance."""
+    variants: dict[str, list[tuple[str, Any]]] = {}
+    for png in pngs:
+        with Image.open(root / png["path"]) as source:
+            variants[png["path"]] = list(transformed_asset_variants(source.convert("RGBA")))
+    classes = visual_equivalence_classes(variants)
+    confirmed_layers = {(candidate["layerPath"], candidate["zIndex"])
+                        for match in matches for candidate in match.get("candidates", [])}
+    result = []
+    for layer, image in layers:
+        if image is None or (layer["layerPath"], layer["zIndex"]) in confirmed_layers:
+            continue
+        target = normalized_rgba(image)
+        ranked = []
+        for png in pngs:
+            if not matching_layer_allowed(png, layer["layerPath"]):
+                continue
+            best_transform = None
+            for transform, variant in variants[png["path"]]:
+                metrics = similarity(variant, target)
+                if metrics is not None and (best_transform is None
+                                            or metrics["confidence"] > best_transform[0]):
+                    best_transform = (metrics["confidence"], transform, metrics)
+            if best_transform is not None:
+                ranked.append((best_transform[0], png, best_transform[1],
+                               best_transform[2], classes[png["path"]]))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        if not ranked:
+            continue
+        best = ranked[0]
+        runner = next((item for item in ranked[1:] if item[4] != best[4]), None)
+        score_margin = best[0] - (runner[0] if runner else 0.0)
+        result.append({
+            "assetPath": best[1]["path"], "layerPath": layer["layerPath"],
+            "layerBounds": layer["bounds"], "zIndex": layer["zIndex"],
+            "transform": best[2], "confidence": round(best[0], 6),
+            "scoreMargin": round(score_margin, 6), "candidateRank": 1,
+            "tier": confidence_tier(best[0], best[3], score_margin),
+            "reviewState": "tentative",
+            **{key: round(value, 6) for key, value in best[3].items()
+               if key != "confidence"},
+        })
+    return result
+
+
 def role_layer_allowed(png: dict[str, Any], layer_path: str) -> bool:
     """Apply role-specific scope only to diagnostics, never auto matching."""
     role = png.get("assetRole", "base")
@@ -680,18 +742,17 @@ def build_unity_placements(manifest: dict[str, Any]) -> dict[str, Any]:
     document_height = (psd or {}).get("height", 0)
     png_by_path = {item["path"]: item for item in manifest.get("png", [])}
     placements = []
-    matches = manifest.get("matches", [])
-    for match in matches:
-      for candidate in match.get("candidates", []):
+    def add_placement(asset_path: str, candidate: dict[str, Any], review_state: str,
+                      tier: str, candidate_rank: int) -> None:
         left, top, right, bottom = candidate["layerBounds"]
-        asset = png_by_path[match["assetPath"]]
+        asset = png_by_path[asset_path]
         transform = candidate["transform"]
         rotation = transform_rotation_degrees(transform)
         placements.append({
             "instanceId": hashlib.sha256(
-                f'{match["assetPath"]}|{candidate["layerPath"]}|{candidate["zIndex"]}'.encode()).hexdigest()[:24],
+                f'{asset_path}|{candidate["layerPath"]}|{candidate["zIndex"]}'.encode()).hexdigest()[:24],
             "assetKey": asset["assetKey"],
-            "assetPath": match["assetPath"],
+            "assetPath": asset_path,
             "layerPath": candidate["layerPath"],
             "position": {"x": (left + right) / (2 * ppu),
                          "y": (document_height - (top + bottom) / 2) / ppu,
@@ -702,12 +763,23 @@ def build_unity_placements(manifest: dict[str, Any]) -> dict[str, Any]:
                       "y": candidate.get("scaleY", 1) *
                              (-1 if transform in ("flipY", "rotate90FlipY") else 1)},
             "sortingOrder": 30000 - candidate["zIndex"],
-            "confidence": 1.0,
-            "reviewState": "autoAccepted",
+            "confidence": candidate.get("confidence", 0),
+            "scoreMargin": candidate.get("scoreMargin", 0),
+            "candidateRank": candidate_rank,
+            "tier": tier,
+            "reviewState": review_state,
             "noCollision": asset["noCollision"],
             "footprint": asset["footprintHint"],
         })
+    matches = manifest.get("matches", [])
+    for match in matches:
+        for candidate in match.get("candidates", []):
+            add_placement(match["assetPath"], candidate, "autoAccepted", "A", 1)
+    for candidate in manifest.get("bestEffortCandidates", []):
+        add_placement(candidate["assetPath"], candidate, "tentative",
+                      candidate["tier"], candidate.get("candidateRank", 1))
     assets = [{"assetKey": item["assetKey"], "assetPath": item["path"],
+               "assetRole": item.get("assetRole", "base"),
                "noCollision": item["noCollision"], "footprint": item["footprintHint"]}
               for item in manifest.get("png", [])]
     return {"formatVersion": 1, "pixelsPerUnit": ppu,
@@ -751,10 +823,18 @@ def make_report(manifest: dict[str, Any], issues: list[Issue]) -> str:
         f"- Confirmed PSD instances / Unity placements: **{instances}**",
         f"- PNG requiring review: **{review_assets}**",
         f"- Unmatched PNG: **{len(matches) - confirmed_assets - review_assets}**", "",
+        "## Reconstruction confidence tiers", "",
+        f"- Tier A / autoAccepted instances: **{instances}**",
+    ]
+    previews = manifest.get("bestEffortCandidates", [])
+    for tier in "BCDEF":
+        lines.append(f"- Tier {tier} / tentative instances: "
+                     f"**{sum(item.get('tier') == tier for item in previews)}**")
+    lines.extend(["",
         "## Match status by asset role", "",
         "| Role | Total | Confirmed | Review | Unmatched |",
         "| --- | ---: | ---: | ---: | ---: |",
-    ]
+    ])
     match_by_path = {match["assetPath"]: match["status"] for match in matches}
     for role in ASSET_ROLES:
         role_assets = [png for png in manifest.get("png", [])
@@ -862,6 +942,7 @@ def run(source: Path, output: Path) -> dict[str, Any]:
         for z_index, (record, _) in enumerate(all_layers):
             record["zIndex"] = z_index
         matches = confirmed_matches(pngs, sample_root, all_layers)
+        best_effort = best_effort_candidates(pngs, sample_root, all_layers, matches)
         diagnostics = role_diagnostics(pngs, sample_root, all_layers, matches)
         composite_comparison = None
         if final is not None and psds and psds[0].get("compositePath"):
@@ -888,6 +969,7 @@ def run(source: Path, output: Path) -> dict[str, Any]:
             "readmeFiles": [rel(path, sample_root) for path in sorted(sample_root.rglob("*"))
                             if path.is_file() and path.name.lower().startswith("readme")],
             "matches": matches,
+            "bestEffortCandidates": best_effort,
             "roleDiagnostics": diagnostics,
             "issues": [asdict(issue) for issue in issues],
         }

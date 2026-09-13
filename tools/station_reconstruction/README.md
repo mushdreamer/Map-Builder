@@ -16,8 +16,8 @@ Generated files:
 
 - `reconstruction.manifest.json`: machine-readable source inventory, TMX masks,
   PSD tree, PNG metadata and top matching candidates;
-- `unity-placements.json`: every split PNG plus editable placements for PSD leaf
-  layers/groups with a high-confidence, unambiguous deterministic match;
+- `unity-placements.json`: every split PNG plus tiered editable placements for
+  PSD layers/groups; Tier A is strict and Tier B–F are tentative previews;
 - `audit-report.md`: human-readable health report and Go/No-Go issues;
 - `previews/psd-composite.png`: PSD composite used by the audit (when the PSD
   decoder supports the document).
@@ -50,10 +50,8 @@ filename rules classify `NoColition_Tile_*` as `floor`,
 `NoColition_stain_*`, and `NoColition_snow_*` as `decal`, and
 `NoColition_1X1_S_*` as an `overlay` candidate; everything else remains `base`.
 The audit report breaks Confirmed / Review / Unmatched totals down by these five
-roles. Classification is diagnostic metadata only: it does not alter candidate
-scores, confirmation decisions, placements, prefab construction, or the Unity
-loader. In particular, the audit does not yet attempt base-plus-overlay composite
-matching.
+roles. Roles do not change visual scores; they constrain decal/floor eligibility
+and inform reporting. The audit does not attempt base-plus-overlay composites.
 
 Unresolved `base` assets receive an asset-centric diagnostic containing their
 best PSD layer, visual score, alpha IoU/MAE, premultiplied color MAE, transform
@@ -81,18 +79,35 @@ remains diagnostic-only because it has not produced useful candidates, while flo
 still receive no ordinary object-candidate diagnostics or automatic placement;
 no composite-asset behavior is introduced.
 
+Strict auto-acceptance is now in a clear diminishing-returns region: the
+remaining cases are dominated by small margins, equivalent exports, composites,
+and PSD organization rather than one safely relaxable cutoff. The Unity manifest
+therefore also contains one best-effort candidate per otherwise-unrepresented
+PSD instance. Tier A remains `autoAccepted`; Tier B requires a very strong visual
+candidate and some separation, Tier C is visually strong but ambiguous, and
+Tier D/E/F progressively expose weaker candidates. All B–F placements are
+`tentative`, retain confidence/margin/rank metadata, and have colliders disabled.
+
 Then open the map scene in Unity and use
 `Tools → Kenney → Art Reconstruction → PNG to Prefabs and Place`:
 
 1. Select `unity-placements.json` and run **PNG → Prefab**. Every delivered
    split PNG becomes a stable prefab; `NoColition_` files omit colliders.
-2. Run **Prefab → 当前场景**. Confirmed PSD matches are instantiated below
-   `KenneySampleMap/ArtPlacements` with document position, rotation, scale and
-   layer order. They remain ordinary prefab instances and can be edited.
-3. Use the existing map export command. Format v3 serializes the edited
-   transforms and the runtime loader restores them without deleting gameplay
-   Tilemap cells.
+2. Run **Prefab → 当前场景**. Placements are instantiated below
+   `KenneySampleMap/ArtPlacements/TierA` through `TierF`. Use the tier checkboxes
+   and **应用 Tier 可见性** to inspect progressively weaker candidates.
+3. Collision-bearing Tier A instances clear only the `Walls` cells covered by
+   their position and footprint. Tentative and `NoColition_` instances never
+   clear gameplay cells. Removed wall tiles are recorded in
+   `KenneyArtReplacementState`, restored before every rerun, and recalculated.
+4. **PNG → Prefab** also creates a collider-free Tile from
+   `NoColition_Tile_basic`. `ArtFloorReplacement` paints it over every existing
+   `Floor` occupancy cell and hides the placeholder Floor renderer without
+   deleting its tiles. Ground, remaining Walls, and collision stay intact.
+5. Use the existing map export command. Format v3 serializes the edited
+   transforms. Tentative records are deliberately excluded from map JSON; only
+   `autoAccepted` or inspector-reviewed `manuallyConfirmed` instances reach the
+   unchanged runtime loader.
 
-The current first-stage safety rule is intentionally strict: low-scoring layers
-and candidates without enough separation from the runner-up stay in the audit
-report for manual work instead of being guessed.
+The strict matcher remains intentionally conservative. Lower tiers fill visual
+gaps for inspection, but never silently become gameplay-authoritative content.

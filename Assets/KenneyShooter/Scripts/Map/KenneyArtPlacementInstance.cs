@@ -9,6 +9,9 @@ namespace KenneyShooter
         public string assetKey;
         public string layerPath;
         public float confidence;
+        public float scoreMargin;
+        public int candidateRank;
+        public string tier;
         public string reviewState;
         public bool noCollision;
     }

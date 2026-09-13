@@ -97,6 +97,34 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(2, len(result["placements"]))
         self.assertEqual({"x": 0.5, "y": 6.0, "z": 0}, result["placements"][0]["position"])
 
+    def test_best_effort_candidates_enter_unity_as_tentative_tiers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Image.new("RGBA", (10, 10), (100, 50, 20, 255))
+            target = Image.new("RGBA", (10, 10), (125, 50, 20, 255))
+            source.save(root / "asset.png")
+            png = {"path": "asset.png", "assetKey": "asset", "assetRole": "base",
+                   "noCollision": False, "footprintHint": {"cols": 1, "rows": 1}}
+            layer = {"layerPath": "preview", "bounds": [0, 0, 10, 10],
+                     "zIndex": 0, "isGroup": False}
+            candidates = audit.best_effort_candidates(
+                [png], root, [(layer, target)],
+                [{"assetPath": "asset.png", "status": "unmatched", "candidates": []}])
+            self.assertEqual(1, len(candidates))
+            self.assertEqual("tentative", candidates[0]["reviewState"])
+            self.assertIn(candidates[0]["tier"], ("B", "C", "D", "E", "F"))
+            manifest = {"tmx": [{"tileWidth": 10}], "psd": [{"width": 20, "height": 20}],
+                        "png": [png], "matches": [], "bestEffortCandidates": candidates}
+            placement = audit.build_unity_placements(manifest)["placements"][0]
+            self.assertEqual("tentative", placement["reviewState"])
+            self.assertEqual(candidates[0]["tier"], placement["tier"])
+            self.assertEqual(1, placement["candidateRank"])
+
+    def test_confidence_tiers_do_not_reclassify_strict_acceptance(self):
+        metrics = {"alphaIoU": 0.95, "colorMae": 0.02}
+        self.assertEqual("B", audit.confidence_tier(0.97, metrics, 0.015))
+        self.assertEqual("C", audit.confidence_tier(0.93, metrics, 0.0))
+
     def test_confirmed_match_supports_rotation_scale_and_small_resampling_error(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
