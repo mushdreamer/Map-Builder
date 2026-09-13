@@ -15,6 +15,13 @@ SPEC.loader.exec_module(audit)
 
 
 class AuditTests(unittest.TestCase):
+    def test_semantic_and_rotated_footprint_evidence(self):
+        self.assertEqual(1.0, audit.semantic_evidence("ticket_gate", "家具/ticket gate 复制"))
+        hint = {"cols": 1, "rows": 2}
+        self.assertEqual(1.0, audit.footprint_evidence(hint, "identity", (20, 40)))
+        self.assertEqual(1.0, audit.footprint_evidence(hint, "rotate90", (40, 20)))
+        self.assertEqual(0.0, audit.footprint_evidence(hint, "rotate90", (20, 40)))
+
     def test_footprint_and_no_collision_conventions(self):
         self.assertEqual({"cols": 1, "rows": 3}, audit.footprint_hint("NoColition_1x3_7"))
         self.assertIsNone(audit.footprint_hint("background"))
@@ -97,6 +104,61 @@ class AuditTests(unittest.TestCase):
             result = audit.confirmed_matches(pngs, root, [(layer, image)])
             self.assertEqual("review", result[0]["status"])
             self.assertEqual(0, len(result[0]["candidates"]))
+
+    def test_named_instance_becomes_prototype_for_anonymous_repeat(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = Image.new("RGBA", (12, 20), (30, 90, 170, 255))
+            pngs = []
+            for name in ("bench_red", "bench_blue"):
+                image.save(root / f"{name}.png")
+                pngs.append({"path": f"{name}.png", "assetKey": name,
+                             "noCollision": False, "footprintHint": None})
+            layers = [
+                ({"layerPath": "repeat 17", "bounds": [20, 0, 32, 20],
+                  "zIndex": 0, "isGroup": False}, image),
+                ({"layerPath": "furniture/bench red", "bounds": [0, 0, 12, 20],
+                  "zIndex": 1, "isGroup": False}, image),
+            ]
+            result = audit.confirmed_matches(pngs, root, layers)
+            self.assertEqual("confirmed", result[0]["status"])
+            self.assertEqual(2, len(result[0]["candidates"]))
+            self.assertTrue(any(candidate["prototypeEvidence"] > 0
+                                for candidate in result[0]["candidates"]))
+            self.assertEqual("unmatched", result[1]["status"])
+
+    def test_free_rotation_is_matched_and_exported_to_unity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Image.new("RGBA", (20, 12), (0, 0, 0, 0))
+            for x in range(3, 17):
+                for y in range(2, 9):
+                    source.putpixel((x, y), (20 + x * 5, 80 + y, 160, 255))
+            source.save(root / "canopy.png")
+            target = dict(audit.transformed_variants(source))["rotate30"]
+            png = {"path": "canopy.png", "assetKey": "canopy", "noCollision": False,
+                   "footprintHint": None}
+            layer = {"layerPath": "canopy", "bounds": [10, 20, 10 + target.width, 20 + target.height],
+                     "zIndex": 2, "isGroup": False}
+            match = audit.confirmed_matches([png], root, [(layer, target)])[0]
+            self.assertEqual("rotate30", match["candidates"][0]["transform"])
+            manifest = {"tmx": [{"tileWidth": 10}], "psd": [{"width": 100, "height": 80}],
+                        "png": [png], "matches": [match]}
+            placement = audit.build_unity_placements(manifest)["placements"][0]
+            self.assertEqual(30, placement["rotationDeg"])
+
+    def test_semantics_cannot_promote_low_visual_confidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Image.new("RGBA", (10, 10), (255, 0, 0, 255))
+            source.save(root / "named.png")
+            target = Image.new("RGBA", (10, 10), (100, 0, 0, 255))
+            png = {"path": "named.png", "assetKey": "named", "noCollision": False,
+                   "footprintHint": None}
+            layer = {"layerPath": "named", "bounds": [0, 0, 10, 10],
+                     "zIndex": 0, "isGroup": False}
+            result = audit.confirmed_matches([png], root, [(layer, target)])[0]
+            self.assertNotEqual("confirmed", result["status"])
 
 
 if __name__ == "__main__":
