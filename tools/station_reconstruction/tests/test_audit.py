@@ -41,6 +41,23 @@ class AuditTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 audit.safe_extract(archive, destination)
 
+    def test_unity_manifest_keeps_all_assets_and_repeated_instances(self):
+        manifest = {
+            "tmx": [{"tileWidth": 10}], "psd": [{"width": 100, "height": 80}],
+            "png": [{"path": "PNG/a.png", "assetKey": "a", "noCollision": True,
+                     "footprintHint": {"cols": 1, "rows": 2}},
+                    {"path": "PNG/unmatched.png", "assetKey": "unmatched", "noCollision": False,
+                     "footprintHint": None}],
+            "matches": [{"assetPath": "PNG/a.png", "candidates": [
+                {"layerPath": "one", "layerBounds": [0, 10, 10, 30], "transform": "identity", "zIndex": 2},
+                {"layerPath": "two", "layerBounds": [20, 20, 30, 40], "transform": "identity", "zIndex": 3}
+            ]}]
+        }
+        result = audit.build_unity_placements(manifest)
+        self.assertEqual(2, len(result["assets"]))
+        self.assertEqual(2, len(result["placements"]))
+        self.assertEqual({"x": 0.5, "y": 6.0, "z": 0}, result["placements"][0]["position"])
+
 
 if __name__ == "__main__":
     unittest.main()
