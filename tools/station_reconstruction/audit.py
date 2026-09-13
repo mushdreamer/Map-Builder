@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - exercised by dependency check in main
     ImageChops = None
 
 
-TOOL_VERSION = 4
+TOOL_VERSION = 5
 FOOTPRINT_RE = re.compile(r"(?<!\d)(\d+)x(\d+)(?!\d)", re.IGNORECASE)
 FINAL_HINTS = ("final", "flatten", "composite", "concept", "preview", "概念", "效果", "车站")
 TOKEN_RE = re.compile(r"[a-z]+|[\u3400-\u9fff]+", re.IGNORECASE)
@@ -34,6 +34,11 @@ GENERIC_TOKENS = {
 }
 FREE_ROTATIONS = (-45, -30, -15, 15, 30, 45)
 ASSET_ROLES = ("base", "overlay", "decal", "edge", "floor")
+ROLE_LAYER_HINTS = {
+    "decal": ("地表贴花", "贴花", "decal"),
+    "edge": ("边缘地砖", "边缘", "edgetile", "edge tile"),
+    "floor": ("地面", "地板", "floor", "ground"),
+}
 
 
 @dataclass(frozen=True)
@@ -455,6 +460,98 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
     return matches
 
 
+def role_layer_allowed(png: dict[str, Any], layer_path: str) -> bool:
+    """Apply role-specific scope only to diagnostics, never auto matching."""
+    role = png.get("assetRole", "base")
+    lower_path = layer_path.lower()
+    if role == "decal":
+        key = png.get("assetKey", "").lower()
+        if "stain" in key:
+            hints = ("stain", "污渍", "污迹")
+        elif "snow" in key:
+            hints = ("snow", "雪")
+        else:
+            hints = ROLE_LAYER_HINTS["decal"]
+        return any(hint in lower_path for hint in hints)
+    if role == "edge":
+        return any(hint in lower_path for hint in ROLE_LAYER_HINTS["edge"])
+    return role == "base"
+
+
+def transform_rotation_degrees(transform: str) -> int:
+    fixed = {"identity": 0, "rotate90": 90, "rotate180": 180,
+             "rotate270": -90, "flipX": 0, "flipY": 0,
+             "rotate90FlipX": 90, "rotate90FlipY": 90}
+    return fixed[transform] if transform in fixed else int(transform.removeprefix("rotate"))
+
+
+def role_diagnostics(pngs: list[dict[str, Any]], root: Path,
+                     layers: list[tuple[dict[str, Any], Any]],
+                     matches: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe unresolved assets without changing confirmation or placements."""
+    statuses = {match["assetPath"]: match["status"] for match in matches}
+    variants: dict[str, list[tuple[str, Any]]] = {}
+    for png in pngs:
+        with Image.open(root / png["path"]) as source:
+            variants[png["path"]] = list(transformed_asset_variants(source.convert("RGBA")))
+
+    targets = [(layer, normalized_rgba(image)) for layer, image in layers if image is not None]
+
+    def best_for_asset(png: dict[str, Any]) -> dict[str, Any]:
+        best: tuple[float, dict[str, Any], str, dict[str, float], Any] | None = None
+        considered_layers = 0
+        for layer, target in targets:
+            if not role_layer_allowed(png, layer["layerPath"]):
+                continue
+            considered_layers += 1
+            for transform, variant in variants[png["path"]]:
+                metrics = similarity(variant, target)
+                if metrics is not None and (best is None or metrics["confidence"] > best[0]):
+                    best = (metrics["confidence"], layer, transform, metrics, target)
+        entry: dict[str, Any] = {
+            "assetPath": png["path"], "assetRole": png.get("assetRole", "base"),
+            "status": statuses.get(png["path"], "unmatched"),
+            "consideredLayerCount": considered_layers, "bestCandidate": None,
+        }
+        if best is None:
+            return entry
+        score, layer, transform, metrics, target = best
+        competitor_score = 0.0
+        for other in pngs:
+            if other["path"] == png["path"]:
+                continue
+            for _other_transform, variant in variants[other["path"]]:
+                other_metrics = similarity(variant, target)
+                if other_metrics is not None:
+                    competitor_score = max(competitor_score, other_metrics["confidence"])
+        entry["bestCandidate"] = {
+            "layerPath": layer["layerPath"], "layerBounds": layer["bounds"],
+            "score": round(score, 6),
+            "alphaIoU": round(metrics["alphaIoU"], 6),
+            "alphaMae": round(metrics["alphaMae"], 6),
+            "colorMae": round(metrics["colorMae"], 6),
+            "transform": transform, "rotationDeg": transform_rotation_degrees(transform),
+            "scaleX": round(metrics["scaleX"], 6), "scaleY": round(metrics["scaleY"], 6),
+            "margin": round(score - competitor_score, 6),
+        }
+        return entry
+
+    unresolved = [png for png in pngs if statuses.get(png["path"]) in ("review", "unmatched")]
+    floor_layers = [{"layerPath": layer["layerPath"], "bounds": layer["bounds"],
+                     "isGroup": layer.get("isGroup", False),
+                     "visible": layer.get("visible", True)}
+                    for layer, _image in layers
+                    if any(hint in layer["layerPath"].lower() for hint in ROLE_LAYER_HINTS["floor"])]
+    return {
+        "diagnosticOnly": True,
+        "baseAssets": [best_for_asset(png) for png in unresolved if png.get("assetRole") == "base"],
+        "decalAssets": [best_for_asset(png) for png in unresolved if png.get("assetRole") == "decal"],
+        "edgeAssets": [best_for_asset(png) for png in unresolved if png.get("assetRole") == "edge"],
+        "floor": {"ordinaryCandidateDiagnosticsDisabled": True,
+                  "possibleLayers": floor_layers},
+    }
+
+
 def choose_final(png_paths: list[Path], psd_paths: list[Path]) -> Path | None:
     excluded = {path.stem.lower() for path in psd_paths}
     ranked = []
@@ -484,17 +581,13 @@ def build_unity_placements(manifest: dict[str, Any]) -> dict[str, Any]:
     document_height = (psd or {}).get("height", 0)
     png_by_path = {item["path"]: item for item in manifest.get("png", [])}
     placements = []
-    transform_rotation = {"identity": 0, "rotate90": 90, "rotate180": 180,
-                          "rotate270": -90, "flipX": 0, "flipY": 0,
-                          "rotate90FlipX": 90, "rotate90FlipY": 90}
     matches = manifest.get("matches", [])
     for match in matches:
       for candidate in match.get("candidates", []):
         left, top, right, bottom = candidate["layerBounds"]
         asset = png_by_path[match["assetPath"]]
         transform = candidate["transform"]
-        rotation = (transform_rotation[transform] if transform in transform_rotation
-                    else int(transform.removeprefix("rotate")))
+        rotation = transform_rotation_degrees(transform)
         placements.append({
             "instanceId": hashlib.sha256(
                 f'{match["assetPath"]}|{candidate["layerPath"]}|{candidate["zIndex"]}'.encode()).hexdigest()[:24],
@@ -570,9 +663,34 @@ def make_report(manifest: dict[str, Any], issues: list[Issue]) -> str:
         statuses = [match_by_path.get(png["path"], "unmatched") for png in role_assets]
         lines.append(f"| {role} | {len(role_assets)} | {statuses.count('confirmed')} | "
                      f"{statuses.count('review')} | {statuses.count('unmatched')} |")
-    lines.extend(["",
-        "## Issues", "",
-    ])
+    diagnostics = manifest.get("roleDiagnostics", {})
+    lines.extend(["", "## Unresolved base diagnostics", "",
+                  "| Asset | Status | Best PSD candidate | Score | Alpha IoU | Color MAE | "
+                  "Rotation | Scale | Margin |",
+                  "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: |"])
+    for entry in diagnostics.get("baseAssets", []):
+        candidate = entry.get("bestCandidate")
+        if candidate is None:
+            lines.append(f"| `{entry['assetPath']}` | {entry['status']} | none | — | — | — | — | — | — |")
+            continue
+        lines.append(
+            f"| `{entry['assetPath']}` | {entry['status']} | `{candidate['layerPath']}` | "
+            f"{candidate['score']} | {candidate['alphaIoU']} | {candidate['colorMae']} | "
+            f"{candidate['rotationDeg']}° | {candidate['scaleX']} × {candidate['scaleY']} | "
+            f"{candidate['margin']} |")
+    lines.extend(["", "## Role-scoped diagnostic candidates", ""])
+    for role in ("decal", "edge"):
+        entries = diagnostics.get(f"{role}Assets", [])
+        with_candidate = sum(entry.get("bestCandidate") is not None for entry in entries)
+        lines.append(f"- **{role}**: {with_candidate}/{len(entries)} unresolved assets have a candidate "
+                     "inside the role-specific PSD path scope.")
+    floor = diagnostics.get("floor", {})
+    floor_layers = floor.get("possibleLayers", [])
+    lines.append(f"- **floor**: ordinary diagnostic matching disabled; "
+                 f"{len(floor_layers)} possible PSD ground layer(s) found.")
+    for layer in floor_layers:
+        lines.append(f"  - `{layer['layerPath']}`")
+    lines.extend(["", "## Issues", ""])
     lines.extend(f"- **{issue.severity} / {issue.code}** — {issue.message}" for issue in issues)
     if not issues:
         lines.append("- None")
@@ -641,6 +759,7 @@ def run(source: Path, output: Path) -> dict[str, Any]:
         for z_index, (record, _) in enumerate(all_layers):
             record["zIndex"] = z_index
         matches = confirmed_matches(pngs, sample_root, all_layers)
+        diagnostics = role_diagnostics(pngs, sample_root, all_layers, matches)
         composite_comparison = None
         if final is not None and psds and psds[0].get("compositePath"):
             with Image.open(final) as final_image, Image.open(staging / psds[0]["compositePath"]) as psd_image:
@@ -666,6 +785,7 @@ def run(source: Path, output: Path) -> dict[str, Any]:
             "readmeFiles": [rel(path, sample_root) for path in sorted(sample_root.rglob("*"))
                             if path.is_file() and path.name.lower().startswith("readme")],
             "matches": matches,
+            "roleDiagnostics": diagnostics,
             "issues": [asdict(issue) for issue in issues],
         }
         unity_manifest = build_unity_placements(manifest)

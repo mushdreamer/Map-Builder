@@ -30,6 +30,16 @@ class AuditTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(role, audit.asset_role(name))
 
+    def test_role_layer_constraints_are_diagnostic_and_specific(self):
+        decal = {"assetRole": "decal", "assetKey": "NoColition_dec_2"}
+        stain = {"assetRole": "decal", "assetKey": "NoColition_stain_2"}
+        edge = {"assetRole": "edge", "assetKey": "NoColition_EdgeTile_pink_3"}
+        self.assertTrue(audit.role_layer_allowed(decal, "场景/地表贴花/碎片"))
+        self.assertFalse(audit.role_layer_allowed(decal, "场景/墙体"))
+        self.assertTrue(audit.role_layer_allowed(stain, "地表贴花/stain 02"))
+        self.assertFalse(audit.role_layer_allowed(stain, "地表贴花/snow 02"))
+        self.assertTrue(audit.role_layer_allowed(edge, "装饰/边缘地砖"))
+
     def test_semantic_and_rotated_footprint_evidence(self):
         self.assertEqual(1.0, audit.semantic_evidence("ticket_gate", "家具/ticket gate 复制"))
         hint = {"cols": 1, "rows": 2}
@@ -190,11 +200,56 @@ class AuditTests(unittest.TestCase):
                 {"assetPath": "overlay-b.png", "status": "unmatched", "candidates": []},
                 {"assetPath": "floor.png", "status": "unmatched", "candidates": []},
             ],
+            "roleDiagnostics": {
+                "baseAssets": [{
+                    "assetPath": "base.png", "status": "review",
+                    "bestCandidate": {"layerPath": "objects/base", "score": 0.89,
+                                      "alphaIoU": 0.9, "colorMae": 0.1,
+                                      "rotationDeg": 15, "scaleX": 1.0, "scaleY": 1.0,
+                                      "margin": 0.01},
+                }],
+                "decalAssets": [], "edgeAssets": [],
+                "floor": {"possibleLayers": [{"layerPath": "map/地面"}]},
+            },
         }
         report = audit.make_report(manifest, [])
         self.assertIn("| base | 1 | 1 | 0 | 0 |", report)
         self.assertIn("| overlay | 2 | 0 | 1 | 1 |", report)
         self.assertIn("| floor | 1 | 0 | 0 | 1 |", report)
+        self.assertIn("`objects/base` | 0.89 | 0.9 | 0.1 | 15°", report)
+        self.assertIn("1 possible PSD ground layer(s)", report)
+
+    def test_role_diagnostics_reports_base_metrics_and_scopes_other_roles(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = Image.new("RGBA", (8, 12), (30, 60, 90, 255))
+            pngs = []
+            for filename, role in (("base.png", "base"), ("decal.png", "decal"),
+                                   ("floor.png", "floor")):
+                image.save(root / filename)
+                pngs.append({"path": filename, "assetKey": Path(filename).stem,
+                             "assetRole": role, "footprintHint": None})
+            layers = [
+                ({"layerPath": "objects/chair", "bounds": [0, 0, 8, 12],
+                  "isGroup": False, "visible": True}, image),
+                ({"layerPath": "地表贴花/mark", "bounds": [10, 0, 18, 12],
+                  "isGroup": False, "visible": True}, image),
+                ({"layerPath": "map/地面", "bounds": [0, 20, 8, 32],
+                  "isGroup": True, "visible": True}, image),
+            ]
+            matches = [{"assetPath": png["path"], "status": "unmatched"} for png in pngs]
+            result = audit.role_diagnostics(pngs, root, layers, matches)
+            base = result["baseAssets"][0]["bestCandidate"]
+            self.assertEqual("objects/chair", base["layerPath"])
+            self.assertEqual(1.0, base["score"])
+            self.assertIn("alphaIoU", base)
+            self.assertIn("colorMae", base)
+            self.assertIn("rotationDeg", base)
+            self.assertIn("scaleX", base)
+            self.assertIn("margin", base)
+            self.assertEqual("地表贴花/mark",
+                             result["decalAssets"][0]["bestCandidate"]["layerPath"])
+            self.assertEqual("map/地面", result["floor"]["possibleLayers"][0]["layerPath"])
 
 
 if __name__ == "__main__":

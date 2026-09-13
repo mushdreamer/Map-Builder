@@ -55,6 +55,21 @@ scores, confirmation decisions, placements, prefab construction, or the Unity
 loader. In particular, the audit does not yet attempt base-plus-overlay composite
 matching.
 
+Unresolved `base` assets receive an asset-centric diagnostic containing their
+best PSD layer, visual score, alpha IoU/MAE, premultiplied color MAE, transform
+and Unity rotation, scale, and margin against the best competing PNG. This is
+reported even when the candidate is below the confirmation gates, so Review and
+Unmatched failure modes can be inspected without changing those gates.
+
+Unresolved `decal` and `edge` diagnostics use PSD path scopes to reduce noise:
+general decals prefer `地表贴花`/decal paths, stain and snow filenames require
+their corresponding path hints, and edge assets prefer `边缘地砖`/edge paths.
+Floor PNGs do not receive ordinary object-candidate diagnostics; instead the
+report inventories PSD paths that look like ground/floor regions. All of these
+role scopes are diagnostic-only. Existing confirmed matches and Unity placements
+continue to come from the unchanged global matcher, and no composite-asset or
+automatic floor-placement behavior is introduced.
+
 Then open the map scene in Unity and use
 `Tools → Kenney → Art Reconstruction → PNG to Prefabs and Place`:
 
