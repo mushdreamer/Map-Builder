@@ -28,6 +28,55 @@ paths and `..` traversal. Source files are only read. A candidate is marked
 scaling and alpha-aware resampling pass both a confidence threshold and a
 runner-up margin. Similarly sized or named assets are never silently accepted.
 
+In addition to the right-angle rotations and mirrors, the bounded transform set
+includes `±15°`, `±30°`, and `±45°` rotations; accepted angles are written to
+Unity as `rotationDeg`. Filename/category words shared with a PSD group or layer
+path, a `1x1`/`1x2`-style footprint whose orientation agrees with the candidate
+rotation, and already confirmed repeated PSD instances may break a close visual
+tie. These signals do **not** increase visual confidence: every auto-accepted
+candidate must still independently clear the `0.90` visual threshold, the alpha
+and color safety gates, and the `0.025` candidate margin after deterministic
+tie-breaking. Anonymous repeats therefore benefit only after a visually safe,
+unambiguous prototype has been established.
+
+Composite diagnostics report both document-canvas sizes and transparent-trimmed
+content sizes. PSD layer inventory also records whether each rendered composite
+size agrees with the layer bounds, which makes canvas-versus-content size
+mismatches actionable without changing matching behavior.
+
+The PNG inventory also assigns a lightweight `assetRole` for reporting. Current
+filename rules classify `NoColition_Tile_*` as `floor`,
+`NoColition_EdgeTile_*` as `edge`, `NoColition_dec_*`,
+`NoColition_stain_*`, and `NoColition_snow_*` as `decal`, and
+`NoColition_1X1_S_*` as an `overlay` candidate; everything else remains `base`.
+The audit report breaks Confirmed / Review / Unmatched totals down by these five
+roles. Classification is diagnostic metadata only: it does not alter candidate
+scores, confirmation decisions, placements, prefab construction, or the Unity
+loader. In particular, the audit does not yet attempt base-plus-overlay composite
+matching.
+
+Unresolved `base` assets receive an asset-centric diagnostic containing their
+best PSD layer, visual score, alpha IoU/MAE, premultiplied color MAE, transform
+and Unity rotation, scale, and margin against the best competing PNG. This is
+reported even when the candidate is below the confirmation gates, so Review and
+Unmatched failure modes can be inspected without changing those gates.
+
+The matcher treats exact or extremely close PNG pixels as a visual equivalence
+class. Equivalent filenames no longer reduce one another's candidate margin;
+the selected representative and all equivalent paths are recorded in the
+manifest. Every representative must still clear the unchanged visual gates. A
+clear visual winner is also selected before semantic tie-breaking, so a naming
+hint cannot overturn a candidate that already has the required visual margin.
+
+`decal` matching is now partitioned by PSD path before running the same
+transform-aware, alpha-aware scoring and unchanged confirmation gates. General
+`dec_*` assets match only `地表贴花`/decal paths, `stain_*` only stain/污渍/血液
+paths, and `snow_*` only snow/雪 paths. Safely confirmed decal candidates flow
+through the existing `matches` and Unity placement output. Edge scope remains
+diagnostic-only because it has not produced useful candidates, while floor PNGs
+still receive no ordinary object-candidate diagnostics or automatic placement;
+no composite-asset behavior is introduced.
+
 Then open the map scene in Unity and use
 `Tools → Kenney → Art Reconstruction → PNG to Prefabs and Place`:
 
