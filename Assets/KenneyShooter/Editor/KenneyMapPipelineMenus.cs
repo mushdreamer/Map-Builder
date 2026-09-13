@@ -255,6 +255,32 @@ public static class KenneyMapPipelineMenus
             meta = new KenneyMapMeta()
         };
 
+        var placementStore = root.GetComponent<KenneyArtPlacementStore>();
+        if (placementStore != null && placementStore.placements != null)
+            data.placements = new List<KenneyArtPlacement>(placementStore.placements);
+        var placementRoot = root.transform.Find("ArtPlacements");
+        if (placementRoot != null)
+        {
+            data.placements.Clear();
+            foreach (var link in placementRoot.GetComponentsInChildren<KenneyArtPlacementInstance>(true))
+            {
+                var renderer = link.GetComponentInChildren<SpriteRenderer>(true);
+                data.placements.Add(new KenneyArtPlacement
+                {
+                    instanceId = link.instanceId,
+                    assetKey = link.assetKey,
+                    layerPath = link.layerPath,
+                    position = link.transform.position,
+                    rotationDeg = link.transform.eulerAngles.z,
+                    scale = new Vector2(link.transform.localScale.x, link.transform.localScale.y),
+                    sortingOrder = renderer != null ? renderer.sortingOrder : 0,
+                    confidence = link.confidence,
+                    reviewState = link.reviewState,
+                    noCollision = link.noCollision
+                });
+            }
+        }
+
         int minX = int.MaxValue, minY = int.MaxValue, maxX = int.MinValue, maxY = int.MinValue;
         bool any = false;
 
