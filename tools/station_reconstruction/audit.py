@@ -24,9 +24,9 @@ except ImportError:  # pragma: no cover - exercised by dependency check in main
     ImageChops = None
 
 
-TOOL_VERSION = 1
+TOOL_VERSION = 2
 FOOTPRINT_RE = re.compile(r"(?<!\d)(\d+)x(\d+)(?!\d)", re.IGNORECASE)
-FINAL_HINTS = ("final", "flatten", "composite", "concept", "preview")
+FINAL_HINTS = ("final", "flatten", "composite", "concept", "preview", "概念", "效果", "车站")
 
 
 @dataclass(frozen=True)
@@ -193,7 +193,9 @@ def audit_psd(path: Path, root: Path, previews: Path) -> tuple[dict[str, Any], l
     except ImportError as error:
         raise RuntimeError("psd-tools is required to inspect PSD files") from error
     psd = PSDImage.open(path)
-    composite = psd.composite()
+    # Explicit viewport is important: layers may have negative/out-of-canvas
+    # bounds, but Photoshop's document composite is always the document canvas.
+    composite = psd.composite(viewport=(0, 0, psd.width, psd.height))
     preview_path = previews / f"{path.stem}-composite.png"
     if composite is not None:
         composite.save(preview_path)
@@ -223,35 +225,121 @@ def transformed_variants(image: Any) -> Iterable[tuple[str, Any]]:
         ("rotate270", normalized.transpose(transpose.ROTATE_270)),
         ("flipX", normalized.transpose(transpose.FLIP_LEFT_RIGHT)),
         ("flipY", normalized.transpose(transpose.FLIP_TOP_BOTTOM)),
+        ("rotate90FlipX", normalized.transpose(transpose.ROTATE_90).transpose(transpose.FLIP_LEFT_RIGHT)),
+        ("rotate90FlipY", normalized.transpose(transpose.ROTATE_90).transpose(transpose.FLIP_TOP_BOTTOM)),
     ])
     yield from variants
 
 
-def exact_matches(pngs: list[dict[str, Any]], root: Path, layers: list[tuple[dict[str, Any], Any]]) -> list[dict[str, Any]]:
-    by_digest: dict[str, list[tuple[dict[str, Any], str]]] = {}
-    for record, image in layers:
-        if image is None or record["isGroup"]:
+def channel_mean(image: Any) -> float:
+    histogram = image.histogram()
+    pixels = image.width * image.height
+    return sum(value * count for value, count in enumerate(histogram)) / (255 * pixels) if pixels else 0.0
+
+
+def similarity(source: Any, target: Any) -> dict[str, float] | None:
+    """Alpha-aware score after fitting source to target's trimmed bounds."""
+    if source.width < 1 or source.height < 1 or target.width < 1 or target.height < 1:
+        return None
+    source_aspect = source.width / source.height
+    target_aspect = target.width / target.height
+    aspect_error = abs(source_aspect / target_aspect - 1.0)
+    if aspect_error > 0.06:
+        return None
+    scale_x, scale_y = target.width / source.width, target.height / source.height
+    if not (0.15 <= scale_x <= 6.0 and 0.15 <= scale_y <= 6.0):
+        return None
+    # Bound comparison cost for large PSD layers while retaining aspect/alpha.
+    comparison_size = target.size
+    if max(comparison_size) > 256:
+        ratio = 256 / max(comparison_size)
+        comparison_size = (max(1, round(target.width * ratio)), max(1, round(target.height * ratio)))
+        target = target.resize(comparison_size, Image.Resampling.LANCZOS)
+    fitted = source if source.size == comparison_size else source.resize(comparison_size, Image.Resampling.LANCZOS)
+    source_alpha, target_alpha = fitted.getchannel("A"), target.getchannel("A")
+    alpha_mae = channel_mean(ImageChops.difference(source_alpha, target_alpha))
+    source_mask = source_alpha.point(lambda value: 255 if value >= 16 else 0)
+    target_mask = target_alpha.point(lambda value: 255 if value >= 16 else 0)
+    intersection = channel_mean(ImageChops.multiply(source_mask, target_mask))
+    union = channel_mean(ImageChops.lighter(source_mask, target_mask))
+    alpha_iou = intersection / union if union else 0.0
+
+    # Premultiplication ignores arbitrary RGB values in fully transparent pixels.
+    rgb_errors = []
+    for channel in range(3):
+        left = ImageChops.multiply(fitted.getchannel(channel), source_alpha)
+        right = ImageChops.multiply(target.getchannel(channel), target_alpha)
+        rgb_errors.append(channel_mean(ImageChops.difference(left, right)))
+    color_mae = sum(rgb_errors) / 3
+    score = max(0.0, 1.0 - (0.45 * alpha_mae + 0.35 * color_mae
+                            + 0.20 * (1.0 - alpha_iou) + aspect_error))
+    return {"confidence": score, "alphaIoU": alpha_iou, "alphaMae": alpha_mae,
+            "colorMae": color_mae, "scaleX": scale_x, "scaleY": scale_y}
+
+
+def transformed_asset_variants(image: Any) -> Iterable[tuple[str, Any]]:
+    # Transform the trimmed asset, not the PSD layer.  The transform therefore
+    # directly describes the Unity instance rather than requiring inversion.
+    yield from transformed_variants(image)
+
+
+def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
+                      layers: list[tuple[dict[str, Any], Any]],
+                      threshold: float = 0.90, margin: float = 0.025) -> list[dict[str, Any]]:
+    """Assign each PSD leaf to a PNG only when score and runner-up margin are safe."""
+    asset_variants: dict[str, list[tuple[str, Any]]] = {}
+    for png in pngs:
+        with Image.open(root / png["path"]) as source:
+            asset_variants[png["path"]] = list(transformed_asset_variants(source.convert("RGBA")))
+    by_asset: dict[str, list[dict[str, Any]]] = {png["path"]: [] for png in pngs}
+    review_by_asset: dict[str, list[dict[str, Any]]] = {png["path"]: [] for png in pngs}
+
+    for layer, image in layers:
+        # A delivered PNG may have been exported from either a raster leaf or a
+        # small PSD group (for example sprite + baked shadow), so both are valid.
+        if image is None:
             continue
-        for transform, variant in transformed_variants(image):
-            by_digest.setdefault(pixel_digest(variant), []).append((record, transform))
+        target = normalized_rgba(image)
+        ranked = []
+        for png in pngs:
+            for transform, variant in asset_variants[png["path"]]:
+                metrics = similarity(variant, target)
+                if metrics is not None:
+                    ranked.append((metrics["confidence"], png["path"], transform, metrics))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        if not ranked:
+            continue
+        best = ranked[0]
+        runner_up = next((item for item in ranked[1:] if item[1] != best[1]), None)
+        score_margin = best[0] - (runner_up[0] if runner_up else 0.0)
+        candidate = {
+            "layerPath": layer["layerPath"], "layerBounds": layer["bounds"],
+            "zIndex": layer["zIndex"], "transform": best[2],
+            "confidence": round(best[0], 6), "scoreMargin": round(score_margin, 6),
+            "method": "alpha-aware-resampled", **{key: round(value, 6) for key, value in best[3].items()
+                                                   if key != "confidence"},
+        }
+        if asset_variants[best[1]] and pixel_digest(asset_variants[best[1]][
+                next(i for i, item in enumerate(asset_variants[best[1]]) if item[0] == best[2])][1]) == pixel_digest(target):
+            candidate["method"] = "trimmed-rgba-sha256"
+            candidate["confidence"] = 1.0
+        geometrically_safe = best[3]["alphaIoU"] >= 0.85 and best[3]["alphaMae"] <= 0.15
+        visually_safe = best[3]["colorMae"] <= 0.15
+        if best[0] >= threshold and score_margin >= margin and geometrically_safe and visually_safe:
+            by_asset[best[1]].append(candidate)
+        elif best[0] >= threshold - 0.08:
+            candidate["reviewReason"] = (
+                "low-confidence" if best[0] < threshold or not geometrically_safe or not visually_safe
+                else "ambiguous")
+            review_by_asset[best[1]].append(candidate)
+
     matches = []
     for png in pngs:
-        candidates = []
-        with Image.open(root / png["path"]) as image:
-            for transform, variant in transformed_variants(image):
-                # Comparing transformed PNG to transformed layer duplicates solutions;
-                # layer variants are sufficient, so only identity PNG is queried.
-                if transform != "identity":
-                    continue
-                for layer, layer_transform in by_digest.get(pixel_digest(variant), []):
-                    candidates.append({
-                        "layerPath": layer["layerPath"],
-                        "layerBounds": layer["bounds"],
-                        "transform": layer_transform,
-                        "confidence": 1.0,
-                        "method": "trimmed-rgba-sha256",
-                    })
-        matches.append({"assetPath": png["path"], "status": "exact" if candidates else "unmatched", "candidates": candidates})
+        candidates = by_asset[png["path"]]
+        reviews = review_by_asset[png["path"]]
+        status = "confirmed" if candidates else ("review" if reviews else "unmatched")
+        matches.append({"assetPath": png["path"], "status": status,
+                        "candidates": candidates, "reviewCandidates": reviews})
     return matches
 
 
@@ -261,11 +349,64 @@ def choose_final(png_paths: list[Path], psd_paths: list[Path]) -> Path | None:
     for path in png_paths:
         lower = path.stem.lower()
         score = sum(1 for hint in FINAL_HINTS if hint in lower)
+        # Production deliveries commonly separate the flattened image from split
+        # assets by directory even when filenames are not English.
+        if "concept" in path.parent.name.lower():
+            score += 10
         if lower in excluded:
             score -= 1
         if score > 0:
             ranked.append((score, path.stat().st_size, path))
     return max(ranked, default=(0, 0, None))[2]
+
+
+def build_unity_placements(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Convert unambiguous exact layer matches to a Unity-consumable manifest.
+
+    Positions remain deterministic document-pixel calculations.  Unity imports
+    sprites at tileWidth PPU, so one TMX tile is one world unit.
+    """
+    psd = manifest["psd"][0] if manifest.get("psd") else None
+    tmx = manifest["tmx"][0] if manifest.get("tmx") else None
+    ppu = (tmx or {}).get("tileWidth", 0) or 1
+    document_height = (psd or {}).get("height", 0)
+    png_by_path = {item["path"]: item for item in manifest.get("png", [])}
+    placements = []
+    transform_rotation = {"identity": 0, "rotate90": 90, "rotate180": 180,
+                          "rotate270": -90, "flipX": 0, "flipY": 0,
+                          "rotate90FlipX": 90, "rotate90FlipY": 90}
+    matches = manifest.get("matches", [])
+    for match in matches:
+      for candidate in match.get("candidates", []):
+        left, top, right, bottom = candidate["layerBounds"]
+        asset = png_by_path[match["assetPath"]]
+        transform = candidate["transform"]
+        placements.append({
+            "instanceId": hashlib.sha256(
+                f'{match["assetPath"]}|{candidate["layerPath"]}|{candidate["zIndex"]}'.encode()).hexdigest()[:24],
+            "assetKey": asset["assetKey"],
+            "assetPath": match["assetPath"],
+            "layerPath": candidate["layerPath"],
+            "position": {"x": (left + right) / (2 * ppu),
+                         "y": (document_height - (top + bottom) / 2) / ppu,
+                         "z": 0},
+            "rotationDeg": transform_rotation[transform],
+            "scale": {"x": candidate.get("scaleX", 1) *
+                             (-1 if transform in ("flipX", "rotate90FlipX") else 1),
+                      "y": candidate.get("scaleY", 1) *
+                             (-1 if transform in ("flipY", "rotate90FlipY") else 1)},
+            "sortingOrder": 30000 - candidate["zIndex"],
+            "confidence": 1.0,
+            "reviewState": "autoAccepted",
+            "noCollision": asset["noCollision"],
+            "footprint": asset["footprintHint"],
+        })
+    assets = [{"assetKey": item["assetKey"], "assetPath": item["path"],
+               "noCollision": item["noCollision"], "footprint": item["footprintHint"]}
+              for item in manifest.get("png", [])]
+    return {"formatVersion": 1, "pixelsPerUnit": ppu,
+            "documentWidth": (psd or {}).get("width", 0),
+            "documentHeight": document_height, "assets": assets, "placements": placements}
 
 
 def compare_images(left: Any, right: Any) -> dict[str, Any]:
@@ -288,24 +429,35 @@ def compare_images(left: Any, right: Any) -> dict[str, Any]:
 
 def make_report(manifest: dict[str, Any], issues: list[Issue]) -> str:
     matches = manifest.get("matches", [])
-    exact = sum(1 for match in matches if match["status"] == "exact")
+    confirmed_assets = sum(1 for match in matches if match["status"] == "confirmed")
+    review_assets = sum(1 for match in matches if match["status"] == "review")
+    instances = sum(len(match.get("candidates", [])) for match in matches)
     lines = [
         "# Station reconstruction data audit", "",
         f"- TMX files: **{len(manifest['tmx'])}**",
         f"- PSD files: **{len(manifest['psd'])}**",
         f"- PNG files: **{len(manifest['png'])}**",
-        f"- Exact PNG → PSD leaf matches: **{exact}/{len(matches)}**", "",
+        f"- Confirmed PNG → PSD matches: **{confirmed_assets}/{len(matches)}**",
+        f"- Confirmed PSD instances / Unity placements: **{instances}**",
+        f"- PNG requiring review: **{review_assets}**",
+        f"- Unmatched PNG: **{len(matches) - confirmed_assets - review_assets}**", "",
         "## Issues", "",
     ]
     lines.extend(f"- **{issue.severity} / {issue.code}** — {issue.message}" for issue in issues)
     if not issues:
         lines.append("- None")
-    lines.extend(["", "## Exact candidates", ""])
+    lines.extend(["", "## Confirmed candidates", ""])
     for match in matches:
-        if match["status"] != "exact":
+        if match["status"] != "confirmed":
             continue
         candidate_names = ", ".join(candidate["layerPath"] for candidate in match["candidates"])
         lines.append(f"- `{match['assetPath']}` → {candidate_names}")
+    lines.extend(["", "## Review candidates", ""])
+    for match in matches:
+        for candidate in match.get("reviewCandidates", []):
+            lines.append(f"- `{match['assetPath']}` → {candidate['layerPath']} "
+                         f"(score={candidate['confidence']}, margin={candidate['scoreMargin']}, "
+                         f"reason={candidate['reviewReason']})")
     lines.append("")
     return "\n".join(lines)
 
@@ -356,7 +508,9 @@ def run(source: Path, output: Path) -> dict[str, Any]:
                 all_layers.extend(layers)
             except Exception as error:
                 issues.append(Issue("error", "psd-parse", f"{rel(path, sample_root)}: {error}"))
-        matches = exact_matches(pngs, sample_root, all_layers) if all_layers else []
+        for z_index, (record, _) in enumerate(all_layers):
+            record["zIndex"] = z_index
+        matches = confirmed_matches(pngs, sample_root, all_layers)
         composite_comparison = None
         if final is not None and psds and psds[0].get("compositePath"):
             with Image.open(final) as final_image, Image.open(staging / psds[0]["compositePath"]) as psd_image:
@@ -378,7 +532,9 @@ def run(source: Path, output: Path) -> dict[str, Any]:
             "matches": matches,
             "issues": [asdict(issue) for issue in issues],
         }
+        unity_manifest = build_unity_placements(manifest)
         (staging / "reconstruction.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (staging / "unity-placements.json").write_text(json.dumps(unity_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         (staging / "audit-report.md").write_text(make_report(manifest, issues), encoding="utf-8")
         output.parent.mkdir(parents=True, exist_ok=True)
         replacement = output.with_name(output.name + ".new")

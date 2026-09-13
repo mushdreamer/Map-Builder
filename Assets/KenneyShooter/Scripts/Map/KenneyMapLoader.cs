@@ -151,8 +151,42 @@ namespace KenneyShooter
 
             ApplyCellNotes(root, data);
             SpawnPlaceables(root, data, layerMaps);
+            SpawnArtPlacements(root, data);
 
             Debug.Log("[KenneyMap] Placed tiles: " + placed);
+        }
+
+        private void SpawnArtPlacements(GameObject root, KenneyMapFile data)
+        {
+            Transform parent = EnsureChild(root.transform, "ArtPlacements");
+            for (int i = parent.childCount - 1; i >= 0; i--)
+                DestroyImmediate(parent.GetChild(i).gameObject);
+            var store = root.GetComponent<KenneyArtPlacementStore>();
+            if (store == null) store = root.AddComponent<KenneyArtPlacementStore>();
+            store.ReplaceAll(data.placements);
+            if (data.placements == null || placeableCatalog == null) return;
+            for (int i = 0; i < data.placements.Count; i++)
+            {
+                var placement = data.placements[i];
+                GameObject prefab;
+                if (placement == null || !placeableCatalog.TryGetPrefab(placement.assetKey, out prefab))
+                    continue;
+                var go = Instantiate(prefab, placement.position,
+                    Quaternion.Euler(0, 0, placement.rotationDeg), parent);
+                go.name = placement.assetKey;
+                go.transform.localScale = new Vector3(placement.scale.x, placement.scale.y, 1);
+                var link = go.GetComponent<KenneyArtPlacementInstance>();
+                if (link == null) link = go.AddComponent<KenneyArtPlacementInstance>();
+                link.instanceId = placement.instanceId;
+                link.assetKey = placement.assetKey;
+                link.layerPath = placement.layerPath;
+                link.confidence = placement.confidence;
+                link.reviewState = placement.reviewState;
+                link.noCollision = placement.noCollision;
+                var renderers = go.GetComponentsInChildren<SpriteRenderer>(true);
+                for (int r = 0; r < renderers.Length; r++)
+                    renderers[r].sortingOrder += placement.sortingOrder;
+            }
         }
 
         /// <summary>
