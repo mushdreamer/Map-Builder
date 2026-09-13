@@ -1,0 +1,9 @@
+地编参考 Prefab 与游戏加载替换共用本目录。
+
+约定：
+- 文件名 = 格子备注里的「类型」（例如 Sofa.prefab → 类型填 Sofa）
+- Prefab 上挂 KenneyPlaceable：原画列、行、开口（沙发示例：3×1，开口朝上）
+- Pivot 放占地几何中心
+- 放入后执行 Tools → Kenney → Map → Rebuild Placeable Catalog
+
+加载地图时会清掉备注占地内的占位砖，再在中心生成对应 Prefab。

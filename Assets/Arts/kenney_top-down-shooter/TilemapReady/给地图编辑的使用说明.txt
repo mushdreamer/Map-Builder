@@ -1,0 +1,24 @@
+﻿Kenney Tilemap 资源（给关卡编辑用）
+================================
+
+已准备：
+- Tiles/  分类 Tile 资产（地面/地板/三色墙/水/自然/家具/道具/Misc）
+- Palettes/  Tile Palette（在 Window → 2D → Tile Palette 下拉选择 Kenney_*）
+- 场景 MapScene 中 KenneySampleMap 含 Ground/Floor/Walls/Decor/Props 层
+
+推荐流程：
+1. 打开 Assets/Scenes/MapScene.unity
+2. Window → 2D → Tile Palette
+3. 下拉选 Kenney_Ground / Kenney_Walls_Orange 等
+4. Hierarchy 选中 KenneySampleMap 下对应 Tilemap 层（如 Walls）
+5. 用笔刷在现有大地图基础上继续绘制
+
+分层建议：
+- Ground = 草地/泥土
+- Floor  = 室内地板
+- Walls  = 墙体（已带 TilemapCollider2D）
+- Decor  = 地毯/玻璃条/杂物
+- Props  = 家具/箱子/植被
+
+若 Palette 下拉为空：菜单 Tools → Kenney → Create Tile Palettes Only
+当前约 524 个分类 Tile，10 个分类 Palette + Master。
