@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - exercised by dependency check in main
     ImageChops = None
 
 
-TOOL_VERSION = 3
+TOOL_VERSION = 4
 FOOTPRINT_RE = re.compile(r"(?<!\d)(\d+)x(\d+)(?!\d)", re.IGNORECASE)
 FINAL_HINTS = ("final", "flatten", "composite", "concept", "preview", "概念", "效果", "车站")
 TOKEN_RE = re.compile(r"[a-z]+|[\u3400-\u9fff]+", re.IGNORECASE)
@@ -33,6 +33,7 @@ GENERIC_TOKENS = {
     "nocolition", "nocollision",
 }
 FREE_ROTATIONS = (-45, -30, -15, 15, 30, 45)
+ASSET_ROLES = ("base", "overlay", "decal", "edge", "floor")
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,29 @@ def footprint_hint(name: str) -> dict[str, int] | None:
     return {"cols": int(match.group(1)), "rows": int(match.group(2))} if match else None
 
 
+def asset_role(name: str) -> str:
+    """Classify an asset conservatively from established delivery names.
+
+    This is reporting metadata only. It deliberately does not affect matching,
+    placement generation, or whether the asset receives a collider.
+    """
+    normalized = name.lower()
+    no_collision_prefix = next((prefix for prefix in ("nocolition_", "nocollision_")
+                                if normalized.startswith(prefix)), None)
+    if no_collision_prefix is None:
+        return "base"
+    suffix = normalized[len(no_collision_prefix):]
+    if suffix.startswith("edgetile_"):
+        return "edge"
+    if suffix.startswith("tile_"):
+        return "floor"
+    if suffix.startswith(("dec_", "stain_", "snow_")):
+        return "decal"
+    if suffix.startswith("1x1_s_"):
+        return "overlay"
+    return "base"
+
+
 def semantic_tokens(value: str) -> set[str]:
     """Return conservative category words shared by asset and PSD names."""
     return {token.lower() for token in TOKEN_RE.findall(value)
@@ -188,6 +212,7 @@ def audit_png(path: Path, root: Path) -> dict[str, Any]:
             "opaquePixelCount": sum(1 for value in image.getchannel("A").getdata() if value),
             "pixelDigest": pixel_digest(image),
             "footprintHint": footprint_hint(path.stem),
+            "assetRole": asset_role(path.stem),
             "noCollision": path.stem.lower().startswith("nocolition_"),
         }
 
@@ -534,8 +559,20 @@ def make_report(manifest: dict[str, Any], issues: list[Issue]) -> str:
         f"- Confirmed PSD instances / Unity placements: **{instances}**",
         f"- PNG requiring review: **{review_assets}**",
         f"- Unmatched PNG: **{len(matches) - confirmed_assets - review_assets}**", "",
-        "## Issues", "",
+        "## Match status by asset role", "",
+        "| Role | Total | Confirmed | Review | Unmatched |",
+        "| --- | ---: | ---: | ---: | ---: |",
     ]
+    match_by_path = {match["assetPath"]: match["status"] for match in matches}
+    for role in ASSET_ROLES:
+        role_assets = [png for png in manifest.get("png", [])
+                       if png.get("assetRole", "base") == role]
+        statuses = [match_by_path.get(png["path"], "unmatched") for png in role_assets]
+        lines.append(f"| {role} | {len(role_assets)} | {statuses.count('confirmed')} | "
+                     f"{statuses.count('review')} | {statuses.count('unmatched')} |")
+    lines.extend(["",
+        "## Issues", "",
+    ])
     lines.extend(f"- **{issue.severity} / {issue.code}** — {issue.message}" for issue in issues)
     if not issues:
         lines.append("- None")

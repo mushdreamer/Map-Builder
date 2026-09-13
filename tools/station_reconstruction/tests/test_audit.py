@@ -15,6 +15,21 @@ SPEC.loader.exec_module(audit)
 
 
 class AuditTests(unittest.TestCase):
+    def test_asset_roles_follow_no_collision_filename_conventions(self):
+        expected = {
+            "Wall_1x1": "base",
+            "NoColition_1X1_S_15": "overlay",
+            "NoColition_dec_2": "decal",
+            "NoColition_stain_4": "decal",
+            "NoColition_snow_1": "decal",
+            "NoColition_EdgeTile_pink_3": "edge",
+            "NoColition_Tile_6": "floor",
+            "NoColition_misc_1": "base",
+        }
+        for name, role in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(role, audit.asset_role(name))
+
     def test_semantic_and_rotated_footprint_evidence(self):
         self.assertEqual(1.0, audit.semantic_evidence("ticket_gate", "家具/ticket gate 复制"))
         hint = {"cols": 1, "rows": 2}
@@ -159,6 +174,27 @@ class AuditTests(unittest.TestCase):
                      "zIndex": 0, "isGroup": False}
             result = audit.confirmed_matches([png], root, [(layer, target)])[0]
             self.assertNotEqual("confirmed", result["status"])
+
+    def test_report_summarizes_match_status_by_asset_role(self):
+        manifest = {
+            "tmx": [], "psd": [],
+            "png": [
+                {"path": "base.png", "assetRole": "base"},
+                {"path": "overlay-a.png", "assetRole": "overlay"},
+                {"path": "overlay-b.png", "assetRole": "overlay"},
+                {"path": "floor.png", "assetRole": "floor"},
+            ],
+            "matches": [
+                {"assetPath": "base.png", "status": "confirmed", "candidates": []},
+                {"assetPath": "overlay-a.png", "status": "review", "candidates": []},
+                {"assetPath": "overlay-b.png", "status": "unmatched", "candidates": []},
+                {"assetPath": "floor.png", "status": "unmatched", "candidates": []},
+            ],
+        }
+        report = audit.make_report(manifest, [])
+        self.assertIn("| base | 1 | 1 | 0 | 0 |", report)
+        self.assertIn("| overlay | 2 | 0 | 1 | 1 |", report)
+        self.assertIn("| floor | 1 | 0 | 0 | 1 |", report)
 
 
 if __name__ == "__main__":

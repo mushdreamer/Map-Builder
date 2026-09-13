@@ -44,6 +44,17 @@ content sizes. PSD layer inventory also records whether each rendered composite
 size agrees with the layer bounds, which makes canvas-versus-content size
 mismatches actionable without changing matching behavior.
 
+The PNG inventory also assigns a lightweight `assetRole` for reporting. Current
+filename rules classify `NoColition_Tile_*` as `floor`,
+`NoColition_EdgeTile_*` as `edge`, `NoColition_dec_*`,
+`NoColition_stain_*`, and `NoColition_snow_*` as `decal`, and
+`NoColition_1X1_S_*` as an `overlay` candidate; everything else remains `base`.
+The audit report breaks Confirmed / Review / Unmatched totals down by these five
+roles. Classification is diagnostic metadata only: it does not alter candidate
+scores, confirmation decisions, placements, prefab construction, or the Unity
+loader. In particular, the audit does not yet attempt base-plus-overlay composite
+matching.
+
 Then open the map scene in Unity and use
 `Tools → Kenney → Art Reconstruction → PNG to Prefabs and Place`:
 
