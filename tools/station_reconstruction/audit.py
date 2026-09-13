@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - exercised by dependency check in main
     ImageChops = None
 
 
-TOOL_VERSION = 6
+TOOL_VERSION = 7
 FOOTPRINT_RE = re.compile(r"(?<!\d)(\d+)x(\d+)(?!\d)", re.IGNORECASE)
 FINAL_HINTS = ("final", "flatten", "composite", "concept", "preview", "概念", "效果", "车站")
 TOKEN_RE = re.compile(r"[a-z]+|[\u3400-\u9fff]+", re.IGNORECASE)
@@ -375,14 +375,23 @@ def layer_decal_subtype(layer_path: str) -> str | None:
 
 
 def matching_layer_allowed(png: dict[str, Any], layer_path: str) -> bool:
-    """Partition decal layers and hold unsupported floor assets for review."""
+    """Scope decal/floor assets without hiding layers from ordinary assets."""
     role = png.get("assetRole", "base")
     if role == "floor":
         return False
     layer_subtype = layer_decal_subtype(layer_path)
     if role == "decal":
         return layer_subtype == decal_subtype(png)
-    return layer_subtype is None
+    # PSD group names describe organization, not exclusive ownership. A normal
+    # prop may legitimately be nested below a decal-like group, so excluding all
+    # non-decals here caused strong base matches and existing placements to vanish.
+    return True
+
+
+def role_match_evidence(png: dict[str, Any], layer_path: str) -> int:
+    """Prefer the scoped decal only when visually equivalent assets tie."""
+    return int(png.get("assetRole") == "decal"
+               and layer_decal_subtype(layer_path) == decal_subtype(png))
 
 
 def visual_equivalence_classes(asset_variants: dict[str, list[tuple[str, Any]]]) -> dict[str, str]:
@@ -447,6 +456,8 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
                     ranked.append({"confidence": metrics["confidence"], "assetPath": png["path"],
                                    "transform": transform, "metrics": metrics,
                                    "equivalenceClass": equivalence_classes[png["path"]],
+                                   "roleMatchEvidence": role_match_evidence(
+                                       png, layer["layerPath"]),
                                    "semanticEvidence": semantic, "footprintEvidence": footprint})
         ranked.sort(key=lambda item: item["confidence"], reverse=True)
         if not ranked:
@@ -476,7 +487,9 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
                     0.06 * item["semanticEvidence"]
                     + 0.03 * item["footprintEvidence"]
                     + 0.04 * item["prototypeEvidence"] if safe else 0.0))
-            visually_ranked = sorted(ranked, key=lambda item: item["confidence"], reverse=True)
+            visually_ranked = sorted(
+                ranked, key=lambda item: (item["confidence"], item["roleMatchEvidence"]),
+                reverse=True)
             visual_best = visually_ranked[0]
             visual_runner = next((item for item in visually_ranked[1:]
                                   if item["equivalenceClass"]
@@ -491,11 +504,16 @@ def confirmed_matches(pngs: list[dict[str, Any]], root: Path,
             else:
                 close = [item for item in ranked
                          if item["confidence"] >= visual_best["confidence"] - margin]
-                close.sort(key=lambda item: (item["tieScore"], item["confidence"]), reverse=True)
+                close.sort(key=lambda item: (item["tieScore"], item["confidence"],
+                                             item["roleMatchEvidence"]), reverse=True)
                 best = close[0]
                 runner_up = next((item for item in close[1:]
                                   if item["equivalenceClass"] != best["equivalenceClass"]), None)
                 score_margin = best["tieScore"] - (runner_up["tieScore"] if runner_up else 0.0)
+            winning_class = best["equivalenceClass"]
+            best = max((item for item in ranked if item["equivalenceClass"] == winning_class),
+                       key=lambda item: (item["roleMatchEvidence"], item["confidence"],
+                                         item["tieScore"]))
             equivalent_paths = sorted(path for path, class_id in equivalence_classes.items()
                                       if class_id == best["equivalenceClass"])
             candidate = {

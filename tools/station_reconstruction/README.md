@@ -68,12 +68,16 @@ manifest. Every representative must still clear the unchanged visual gates. A
 clear visual winner is also selected before semantic tie-breaking, so a naming
 hint cannot overturn a candidate that already has the required visual margin.
 
-`decal` matching is now partitioned by PSD path before running the same
+`decal` assets are constrained by PSD path before running the same
 transform-aware, alpha-aware scoring and unchanged confirmation gates. General
 `dec_*` assets match only `地表贴花`/decal paths, `stain_*` only stain/污渍/血液
 paths, and `snow_*` only snow/雪 paths. Safely confirmed decal candidates flow
-through the existing `matches` and Unity placement output. Edge scope remains
-diagnostic-only because it has not produced useful candidates, while floor PNGs
+through the existing `matches` and Unity placement output. Those paths are not
+exclusive ownership boundaries: base and overlay assets remain eligible because
+real PSD organization can place ordinary props below decal-named parent groups.
+Within one visual equivalence class a scoped decal is the deterministic
+representative, while a clearly better base visual match still wins. Edge scope
+remains diagnostic-only because it has not produced useful candidates, while floor PNGs
 still receive no ordinary object-candidate diagnostics or automatic placement;
 no composite-asset behavior is introduced.
 
