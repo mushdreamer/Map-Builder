@@ -16,8 +16,8 @@ Generated files:
 
 - `reconstruction.manifest.json`: machine-readable source inventory, TMX masks,
   PSD tree, PNG metadata and top matching candidates;
-- `unity-placements.json`: every split PNG plus tiered editable placements for
-  PSD layers/groups; Tier A is strict and Tier B–F are tentative previews;
+- `unity-placements.json`: every split PNG plus strict Tier A placements for
+  high-confidence, unambiguous PSD layers/groups;
 - `audit-report.md`: human-readable health report and Go/No-Go issues;
 - `previews/psd-composite.png`: PSD composite used by the audit (when the PSD
   decoder supports the document).
@@ -79,35 +79,32 @@ remains diagnostic-only because it has not produced useful candidates, while flo
 still receive no ordinary object-candidate diagnostics or automatic placement;
 no composite-asset behavior is introduced.
 
-Strict auto-acceptance is now in a clear diminishing-returns region: the
-remaining cases are dominated by small margins, equivalent exports, composites,
-and PSD organization rather than one safely relaxable cutoff. The Unity manifest
-therefore also contains one best-effort candidate per otherwise-unrepresented
-PSD instance. Tier A remains `autoAccepted`; Tier B requires a very strong visual
-candidate and some separation, Tier C is visually strong but ambiguous, and
-Tier D/E/F progressively expose weaker candidates. All B–F placements are
-`tentative`, retain confidence/margin/rank metadata, and have colliders disabled.
+Local rank-1 best-effort placement was removed after real-scene validation showed
+that it lacked enough scene context and produced duplicated props and intersecting
+large assets. The Unity apply path consumes strict `autoAccepted` records only.
 
 Then open the map scene in Unity and use
 `Tools → Kenney → Art Reconstruction → PNG to Prefabs and Place`:
 
 1. Select `unity-placements.json` and run **PNG → Prefab**. Every delivered
    split PNG becomes a stable prefab; `NoColition_` files omit colliders.
-2. Run **Prefab → 当前场景**. Placements are instantiated below
-   `KenneySampleMap/ArtPlacements/TierA` through `TierF`. Use the tier checkboxes
-   and **应用 Tier 可见性** to inspect progressively weaker candidates.
-3. Collision-bearing Tier A instances clear only the `Walls` cells covered by
-   their position and footprint. Tentative and `NoColition_` instances never
-   clear gameplay cells. Removed wall tiles are recorded in
+2. Run **Apply Reconstruction to Layout**. Collision-bearing records that cover
+   Wall occupancy are instantiated below `Walls/ReconstructedPrefabs`; other
+   collision-bearing props go below `Props/ReconstructedPrefabs`; NoCollision,
+   overlay, and decal visuals go below `Decor/ReconstructedPrefabs`.
+3. Wall-replacing instances clear only the `Walls` cells covered by their
+   position and footprint. `NoColition_` instances never clear gameplay cells.
+   Removed wall tiles are recorded in
    `KenneyArtReplacementState`, restored before every rerun, and recalculated.
 4. **PNG → Prefab** also creates a collider-free Tile from
-   `NoColition_Tile_basic`. `ArtFloorReplacement` paints it over every existing
-   `Floor` occupancy cell and hides the placeholder Floor renderer without
-   deleting its tiles. Ground, remaining Walls, and collision stay intact.
+   `NoColition_Tile_basic`. Apply replaces the Tile reference in every occupied
+   `Floor` cell with this real art Tile. Occupancy remains in the formal `Floor`
+   Tilemap; no parallel floor hierarchy is created. Ground, remaining Walls, and
+   collision stay intact.
 5. Use the existing map export command. Format v3 serializes the edited
-   transforms. Tentative records are deliberately excluded from map JSON; only
-   `autoAccepted` or inspector-reviewed `manuallyConfirmed` instances reach the
-   unchanged runtime loader.
+   transforms and their formal target layer. Only `autoAccepted` or
+   inspector-reviewed `manuallyConfirmed` instances are exported.
 
-The strict matcher remains intentionally conservative. Lower tiers fill visual
-gaps for inspection, but never silently become gameplay-authoritative content.
+After apply, legacy `ArtPlacements` and `ArtFloorReplacement` staging objects are
+removed. The formal top-level layout remains Ground / Floor / Walls / Decor /
+Props; generated prefabs are owned by the relevant formal layer.

@@ -9,6 +9,7 @@ namespace KenneyShooter
     {
         public List<Vector3Int> clearedWallCells = new List<Vector3Int>();
         public List<TileBase> clearedWallTiles = new List<TileBase>();
-        public bool floorRendererHidden;
+        public List<Vector3Int> replacedFloorCells = new List<Vector3Int>();
+        public List<TileBase> replacedFloorTiles = new List<TileBase>();
     }
 }

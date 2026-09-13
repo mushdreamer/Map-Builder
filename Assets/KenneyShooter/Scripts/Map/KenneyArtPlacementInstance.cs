@@ -12,6 +12,7 @@ namespace KenneyShooter
         public float scoreMargin;
         public int candidateRank;
         public string tier;
+        public string targetLayer;
         public string reviewState;
         public bool noCollision;
     }
