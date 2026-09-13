@@ -258,12 +258,17 @@ public static class KenneyMapPipelineMenus
         var placementStore = root.GetComponent<KenneyArtPlacementStore>();
         if (placementStore != null && placementStore.placements != null)
             data.placements = new List<KenneyArtPlacement>(placementStore.placements);
-        var placementRoot = root.transform.Find("ArtPlacements");
-        if (placementRoot != null)
+        var placementLinks = root.GetComponentsInChildren<KenneyArtPlacementInstance>(true);
+        if (placementLinks.Length > 0)
         {
             data.placements.Clear();
-            foreach (var link in placementRoot.GetComponentsInChildren<KenneyArtPlacementInstance>(true))
+            foreach (var link in placementLinks)
             {
+                // Tentative reconstruction is an editor preview only. Keeping it
+                // out of map JSON prevents prefab colliders from becoming active
+                // when the unchanged runtime loader instantiates placements.
+                if (link.reviewState != "autoAccepted" && link.reviewState != "manuallyConfirmed")
+                    continue;
                 var renderer = link.GetComponentInChildren<SpriteRenderer>(true);
                 data.placements.Add(new KenneyArtPlacement
                 {
@@ -276,6 +281,7 @@ public static class KenneyMapPipelineMenus
                     sortingOrder = renderer != null ? renderer.sortingOrder : 0,
                     confidence = link.confidence,
                     reviewState = link.reviewState,
+                    targetLayer = link.targetLayer,
                     noCollision = link.noCollision
                 });
             }

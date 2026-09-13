@@ -151,16 +151,22 @@ namespace KenneyShooter
 
             ApplyCellNotes(root, data);
             SpawnPlaceables(root, data, layerMaps);
-            SpawnArtPlacements(root, data);
+            SpawnReconstructedPrefabs(root, data);
 
             Debug.Log("[KenneyMap] Placed tiles: " + placed);
         }
 
-        private void SpawnArtPlacements(GameObject root, KenneyMapFile data)
+        private void SpawnReconstructedPrefabs(GameObject root, KenneyMapFile data)
         {
-            Transform parent = EnsureChild(root.transform, "ArtPlacements");
-            for (int i = parent.childCount - 1; i >= 0; i--)
-                DestroyImmediate(parent.GetChild(i).gameObject);
+            string[] formalLayers = { "Walls", "Decor", "Props" };
+            for (int l = 0; l < formalLayers.Length; l++)
+            {
+                Transform layer = root.transform.Find(formalLayers[l]);
+                Transform generated = layer != null ? layer.Find("ReconstructedPrefabs") : null;
+                if (generated != null) DestroyImmediate(generated.gameObject);
+            }
+            Transform legacy = root.transform.Find("ArtPlacements");
+            if (legacy != null) DestroyImmediate(legacy.gameObject);
             var store = root.GetComponent<KenneyArtPlacementStore>();
             if (store == null) store = root.AddComponent<KenneyArtPlacementStore>();
             store.ReplaceAll(data.placements);
@@ -171,6 +177,10 @@ namespace KenneyShooter
                 GameObject prefab;
                 if (placement == null || !placeableCatalog.TryGetPrefab(placement.assetKey, out prefab))
                     continue;
+                string layerName = string.IsNullOrEmpty(placement.targetLayer)
+                    ? (placement.noCollision ? "Decor" : "Props") : placement.targetLayer;
+                Transform layer = EnsureChild(root.transform, layerName);
+                Transform parent = EnsureChild(layer, "ReconstructedPrefabs");
                 var go = Instantiate(prefab, placement.position,
                     Quaternion.Euler(0, 0, placement.rotationDeg), parent);
                 go.name = placement.assetKey;
@@ -182,6 +192,7 @@ namespace KenneyShooter
                 link.layerPath = placement.layerPath;
                 link.confidence = placement.confidence;
                 link.reviewState = placement.reviewState;
+                link.targetLayer = layerName;
                 link.noCollision = placement.noCollision;
                 var renderers = go.GetComponentsInChildren<SpriteRenderer>(true);
                 for (int r = 0; r < renderers.Length; r++)

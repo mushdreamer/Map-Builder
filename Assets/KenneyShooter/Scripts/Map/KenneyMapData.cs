@@ -34,6 +34,7 @@ namespace KenneyShooter
         public int sortingOrder;
         public float confidence;
         public string reviewState;
+        public string targetLayer;
         public bool noCollision;
     }
 
